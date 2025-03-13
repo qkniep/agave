@@ -8192,6 +8192,7 @@ dependencies = [
  "solana-frozen-abi-macro",
  "solana-logger",
  "solana-measure",
+ "solana-merkle-tree",
  "solana-metrics",
  "solana-perf",
  "solana-program-runtime",

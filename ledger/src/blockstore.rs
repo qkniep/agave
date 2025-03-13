@@ -34,6 +34,7 @@ use {
     solana_accounts_db::hardened_unpack::unpack_genesis_archive,
     solana_entry::entry::{create_ticks, Entry},
     solana_measure::measure::Measure,
+    solana_merkle_tree::MerkleTree,
     solana_metrics::{
         datapoint_error,
         poh_timing_point::{send_poh_timing_point, PohTimingSender, SlotPohTimingInfo},
@@ -3846,7 +3847,26 @@ impl Blockstore {
             datapoint_warn!("incomplete_final_fec_set", ("slot", slot, i64),);
         }
         // Return block id / error based on feature flags
-        results.get_last_fec_set_merkle_root(feature_set)
+        let _old_block_id = results.get_last_fec_set_merkle_root(feature_set)?;
+
+        // PERF: maybe iterate FEC sets directly, instead of iterating over shreds and dedeuplicating
+        let slot_meta = self.meta(slot)?.ok_or(BlockstoreError::SlotUnavailable)?;
+        let last_shred_index = slot_meta
+            .last_index
+            .ok_or(BlockstoreError::UnknownLastIndex(slot))?;
+        let roots: Vec<_> = (0..last_shred_index)
+            .map(|i| {
+                self.merkle_root_meta(ErasureSetId::new(slot, i as u32))
+                    .unwrap()
+                    .unwrap()
+                    .merkle_root()
+                    .unwrap()
+                    .to_bytes()
+            })
+            .dedup()
+            .collect();
+        let tree = MerkleTree::new(&roots);
+        Ok(tree.get_root().cloned())
     }
 
     /// Performs checks on the last FEC set for this slot.
