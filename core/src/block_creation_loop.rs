@@ -497,8 +497,7 @@ fn record_and_complete_block(
     );
 
     drop(bank);
-    w_poh_recorder.tick_alpenglow(max_tick_height);
-
+    w_poh_recorder.tick_alpenglow(max_tick_height, footer);
     Ok(())
 }
 
