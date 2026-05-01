@@ -121,6 +121,14 @@ pub fn ed25519_verify(
     });
 }
 
+pub fn ed25519_verify_serial(batch: &mut PacketBatch, reject_non_vote: bool) {
+    for mut packet in batch.iter_mut() {
+        if !packet.meta().discard() && !verify_packet(&mut packet, reject_non_vote) {
+            packet.meta_mut().set_discard(true);
+        }
+    }
+}
+
 pub fn mark_disabled(batches: &mut [PacketBatch], r: &[Vec<u8>]) {
     for (batch, v) in batches.iter_mut().zip(r) {
         for (mut pkt, f) in batch.iter_mut().zip(v) {
