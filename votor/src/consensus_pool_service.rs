@@ -161,6 +161,7 @@ impl ConsensusPoolService {
                 consensus_pool,
                 events,
                 &ctx.commitment_sender,
+                stats,
             )?;
         Self::maybe_update_root_and_send_new_certificates(
             consensus_pool,
@@ -339,6 +340,7 @@ impl ConsensusPoolService {
         consensus_pool: &mut ConsensusPool,
         votor_events: &mut Vec<VotorEvent>,
         commitment_sender: &Sender<CommitmentAggregationData>,
+        stats: &mut ConsensusPoolServiceStats,
     ) -> Result<(Option<Slot>, Vec<Arc<Certificate>>), AddVoteError> {
         let (new_finalized_slot, new_certificates_to_send) =
             consensus_pool.add_message(root_bank, my_vote_pubkey, message, votor_events)?;
@@ -351,6 +353,7 @@ impl ConsensusPoolService {
             new_finalized_slot,
             commitment_sender,
         )?;
+        stats.standstill = false;
         Ok((Some(new_finalized_slot), new_certificates_to_send))
     }
 
@@ -577,6 +580,7 @@ mod tests {
                 rank: my_rank as u16,
             });
 
+            let mut stats = ConsensusPoolServiceStats::new();
             let result = ConsensusPoolService::add_message_and_maybe_update_commitment(
                 &root_bank,
                 &ctx.my_pubkey,
@@ -585,11 +589,11 @@ mod tests {
                 &mut ctx.consensus_pool,
                 &mut events,
                 &ctx.commitment_sender,
+                &mut stats,
             );
             assert!(result.is_ok());
 
             let (new_finalized_slot, new_certificates_to_send) = result.unwrap();
-            let mut stats = ConsensusPoolServiceStats::new();
             let mut standstill_timer = Instant::now();
 
             // Send certificates if any were produced
@@ -659,6 +663,7 @@ mod tests {
         };
         events.clear();
 
+        let mut stats = ConsensusPoolServiceStats::new();
         let result = ConsensusPoolService::add_message_and_maybe_update_commitment(
             &root_bank,
             &ctx.my_pubkey,
@@ -667,11 +672,11 @@ mod tests {
             &mut ctx.consensus_pool,
             &mut events,
             &ctx.commitment_sender,
+            &mut stats,
         );
         assert!(result.is_ok());
 
         let (new_finalized_slot, new_certificates_to_send) = result.unwrap();
-        let mut stats = ConsensusPoolServiceStats::new();
         let mut standstill_timer = Instant::now();
 
         ConsensusPoolService::maybe_update_root_and_send_new_certificates(
@@ -713,6 +718,7 @@ mod tests {
         let mut events = vec![];
 
         // Send skip certificates for all slots up to the next leader slot
+        let mut stats = ConsensusPoolServiceStats::new();
         for slot in 1..next_leader_slot.0 {
             let skip_certificate = Certificate {
                 cert_type: CertificateType::Skip(slot),
@@ -728,6 +734,7 @@ mod tests {
                 &mut ctx.consensus_pool,
                 &mut events,
                 &ctx.commitment_sender,
+                &mut stats,
             );
             assert!(result.is_ok());
         }
@@ -749,7 +756,6 @@ mod tests {
             commitment_sender: ctx.commitment_sender.clone(),
             highest_finalized: ctx.highest_finalized.clone(),
         };
-        let mut stats = ConsensusPoolServiceStats::new();
 
         // Add a ParentReady event for the slot before our leader slot
         events.push(VotorEvent::ParentReady {
