@@ -57,6 +57,7 @@ pub fn vote_to_cert_types(vote: &Vote) -> Vec<CertificateType> {
 
 pub const MAX_ENTRIES_PER_PUBKEY_FOR_OTHER_TYPES: usize = 1;
 pub const MAX_ENTRIES_PER_PUBKEY_FOR_NOTARIZE_LITE: usize = 3;
+pub const MAX_NOTAR_FALLBACK_BLOCKS: usize = 7;
 
 pub const SAFE_TO_NOTAR_MIN_NOTARIZE_ONLY: Fraction = Fraction::from_percentage(40);
 pub const SAFE_TO_NOTAR_MIN_NOTARIZE_FOR_NOTARIZE_OR_SKIP: Fraction = Fraction::from_percentage(20);
