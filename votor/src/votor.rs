@@ -46,6 +46,7 @@
 use {
     crate::{
         commitment::CommitmentAggregationData,
+        common::StandstillSignal,
         consensus_metrics::{
             ConsensusMetrics, ConsensusMetricsEventReceiver, ConsensusMetricsEventSender,
         },
@@ -109,6 +110,7 @@ pub struct VotorConfig {
     pub rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
     pub consensus_metrics_sender: ConsensusMetricsEventSender,
     pub highest_finalized: Arc<RwLock<Option<ValidatedBlockFinalizationCert>>>,
+    pub standstill_signal: Arc<StandstillSignal>,
 
     // Senders / Notifiers
     pub snapshot_controller: Option<Arc<SnapshotController>>,
@@ -184,6 +186,7 @@ impl Votor {
             reward_certs_sender,
             generated_cert_types,
             highest_finalized,
+            standstill_signal,
         } = config;
 
         let migration_status = bank_forks.read().unwrap().migration_status();
@@ -235,6 +238,7 @@ impl Votor {
             migration_status: migration_status.clone(),
             event_receiver,
             timer_manager: Arc::clone(&timer_manager),
+            standstill_signal,
             shared_context,
             voting_context,
             root_context,

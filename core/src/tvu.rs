@@ -29,6 +29,7 @@ use {
         window_service::{WindowService, WindowServiceChannels},
     },
     agave_votor::{
+        common::StandstillSignal,
         consensus_metrics::MAX_IN_FLIGHT_CONSENSUS_EVENTS,
         event::{LeaderWindowInfo, VotorEventReceiver, VotorEventSender},
         generated_cert_types::GeneratedCertTypes,
@@ -415,6 +416,10 @@ impl Tvu {
             completed_slots_receiver,
         };
 
+        // Shared standstill state, read by both votor (vote timeouts) and
+        // repair (retry timeouts).
+        let standstill_signal = Arc::new(StandstillSignal::new());
+
         let window_service = {
             let epoch_schedule = bank_forks
                 .read()
@@ -430,6 +435,7 @@ impl Tvu {
                 repair_whitelist: tvu_config.repair_whitelist,
                 cluster_info: cluster_info.clone(),
                 cluster_slots: cluster_slots.clone(),
+                standstill_signal: standstill_signal.clone(),
             };
             let repair_service_channels = RepairServiceChannels::new(
                 verified_voter_slots_receiver,
@@ -512,6 +518,7 @@ impl Tvu {
             build_reward_certs_receiver,
             generated_cert_types,
             highest_finalized,
+            standstill_signal,
         };
         let votor = Votor::new(votor_config);
 
