@@ -4,6 +4,7 @@ use {
         fraction::Fraction,
         vote::{Vote, VoteType},
     },
+    solana_clock::DEFAULT_MS_PER_SLOT,
     std::time::Duration,
 };
 
@@ -68,8 +69,17 @@ pub const SAFE_TO_SKIP_THRESHOLD: Fraction = Fraction::from_percentage(40);
 /// Time bound assumed on network transmission delays during periods of synchrony.
 pub const DELTA: Duration = Duration::from_millis(250);
 
-/// Base timeout for when leader's first slice should arrive if they sent it immediately.
+/// Base network-synchrony bound: time after a leader sends their first slice
+/// by which a correct receiver should have observed it.
 pub(crate) const DELTA_TIMEOUT: Duration = DELTA.checked_mul(3).unwrap();
+
+/// Time budget we allow a leader to build and send their first slice after
+/// their leader window starts. `TimeoutCrashedLeader` must therefore fire
+/// no earlier than `DELTA_TIMEOUT + DELTA_FIRST_SLICE` from the start of the
+/// window, otherwise we may declare a correct leader crashed.
+///
+/// Conservatively initialized to one slot's worth of pacing.
+pub(crate) const DELTA_FIRST_SLICE: Duration = Duration::from_millis(DEFAULT_MS_PER_SLOT);
 
 /// Timeout for standstill detection mechanism.
 pub(crate) const DELTA_STANDSTILL: Duration = Duration::from_millis(10_000);
