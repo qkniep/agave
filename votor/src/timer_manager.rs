@@ -102,10 +102,11 @@ mod tests {
             exit.clone(),
             Arc::new(MigrationStatus::post_migration_status()),
         );
+        let delta_first_slice = DELTA_FIRST_SLICE;
         let delta_block = Duration::from_millis(DEFAULT_MS_PER_SLOT);
         let slot = 52;
         let start = Instant::now();
-        timer_manager.set_timeouts(slot, None, delta_block);
+        timer_manager.set_timeouts(slot, None, delta_first_slice, delta_block);
         // Should see two timeouts at delta_block and DELTA_TIMEOUT
         let mut timeouts_received = 0;
         while timeouts_received < 2 && Instant::now().duration_since(start) < Duration::from_secs(2)
