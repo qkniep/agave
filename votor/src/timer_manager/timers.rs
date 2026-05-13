@@ -42,8 +42,8 @@ enum TimerState {
         timeout: Instant,
         /// The maximum allowed time for producing the first slice.
         delta_first_slice: Duration,
-        /// The scaled delta_block duration for this timer.
-        scaled_delta_block: Duration,
+        /// Protocol slot time, used in [`TimerState::WaitDeltaBlock`].
+        delta_block: Duration,
     },
     /// Waiting for DELTA_TIMEOUT + i * DELTA_BLOCK for each block i in window.
     WaitForBlock {
@@ -51,8 +51,8 @@ enum TimerState {
         window: VecDeque<Slot>,
         /// Time when this stage will end.
         timeout: Instant,
-        /// The scaled delta_block duration for this timer.
-        scaled_delta_block: Duration,
+        /// Protocol slot time.
+        delta_block: Duration,
     },
     /// The state machine is done.
     Done,
@@ -61,8 +61,10 @@ enum TimerState {
 impl TimerState {
     /// Creates a new instance of the state machine.
     ///
-    /// The `timeout_multiplier` is used to extend the timeout durations (e.g., 1.05 = 5% longer).
-    /// Also returns the next time the timer should fire.
+    /// The `timeout_multiplier` extends only the network-DELTA-derived timeout
+    /// (`delta_timeout`). `delta_block` is protocol pacing, not a function of
+    /// network delays, so it is not scaled. Also returns the next time the
+    /// timer should fire.
     fn new(
         slot: Slot,
         delta_timeout: Duration,
@@ -73,13 +75,10 @@ impl TimerState {
     ) -> (Self, Instant) {
         let window = (slot..=last_of_consecutive_leader_slots(slot)).collect::<VecDeque<_>>();
         assert!(!window.is_empty());
-        // Scale the timeouts by the multiplier, capping at 1 hour.
         let scaled_delta_timeout = Duration::from_secs_f64(
             (delta_timeout.as_secs_f64() * timeout_multiplier).min(MAX_TIMEOUT_SECS),
         );
-        let scaled_delta_block = Duration::from_secs_f64(
-            (delta_block.as_secs_f64() * timeout_multiplier).min(MAX_TIMEOUT_SECS),
-        );
+
         // A correct leader may take up to `DELTA_FIRST_SLICE` to send their first slice,
         // so the earliest sound point to declare them crashed is
         // `DELTA_FIRST_SLICE + delta_timeout` after their window starts.
@@ -92,7 +91,7 @@ impl TimerState {
                 window,
                 timeout,
                 delta_first_slice,
-                scaled_delta_block,
+                delta_block,
             },
             timeout,
         )
@@ -107,30 +106,30 @@ impl TimerState {
                 window,
                 timeout,
                 delta_first_slice,
-                scaled_delta_block,
+                delta_block,
             } => {
                 assert!(!window.is_empty());
                 if &now < timeout {
                     return None;
                 }
                 let slot = *window.front().unwrap();
-                // Slot 0's block deadline is `T + scaled_delta_block + scaled_delta_timeout`;
-                // back out the `DELTA_FIRST_SLICE` paid up-front to `WaitDeltaTimeout`.
+                // Slot 0's block deadline is `T + delta_block + scaled_delta_timeout`;
+                // subtract the `DELTA_FIRST_SLICE` paid up-front to `WaitDeltaTimeout`.
                 let new_timeout = timeout
-                    .checked_add(*scaled_delta_block)
+                    .checked_add(*delta_block)
                     .and_then(|t| t.checked_sub(*delta_first_slice))
                     .unwrap();
                 *self = Self::WaitForBlock {
                     window: window.to_owned(),
                     timeout: new_timeout,
-                    scaled_delta_block: *scaled_delta_block,
+                    delta_block: *delta_block,
                 };
                 Some(VotorEvent::TimeoutCrashedLeader(slot))
             }
             Self::WaitForBlock {
                 window,
                 timeout,
-                scaled_delta_block,
+                delta_block,
             } => {
                 assert!(!window.is_empty());
                 if &now < timeout {
@@ -141,7 +140,7 @@ impl TimerState {
                 match window.front() {
                     None => *self = Self::Done,
                     Some(_next_slot) => {
-                        *timeout = timeout.checked_add(*scaled_delta_block).unwrap();
+                        *timeout = timeout.checked_add(*delta_block).unwrap();
                     }
                 }
                 ret
@@ -382,10 +381,10 @@ mod tests {
             VotorEvent::TimeoutCrashedLeader(0)
         ));
 
-        // Slot 0's block deadline is `now + scaled_delta_block + scaled_delta_timeout`
-        // = now + 75ms + 150ms = now + 225ms (unaffected by DELTA_FIRST_SLICE).
+        // Slot 0's block deadline is `now + delta_block + scaled_delta_timeout`
+        // = now + 50ms + 150ms = now + 200ms (unaffected by DELTA_FIRST_SLICE).
         let next = timer_state.next_fire().unwrap();
-        let expected_next = now + Duration::from_millis(225);
+        let expected_next = now + Duration::from_millis(200);
         let skew = if next >= expected_next {
             next - expected_next
         } else {
@@ -429,12 +428,13 @@ mod tests {
         let now = Instant::now();
         // Use a large multiplier that would exceed MAX_TIMEOUT
         let multiplier = 1000000.0;
+        let delta_block = Duration::from_millis(DEFAULT_MS_PER_SLOT);
 
         let (mut timer_state, next_fire) = TimerState::new(
             100,
             DELTA_TIMEOUT,
             DELTA_FIRST_SLICE,
-            Duration::from_millis(DEFAULT_MS_PER_SLOT),
+            delta_block,
             now,
             multiplier,
         );
@@ -450,13 +450,10 @@ mod tests {
             VotorEvent::TimeoutCrashedLeader(100)
         ));
 
-        // Slot 0's block deadline is `T + scaled_delta_block + scaled_delta_timeout`, so
-        // the gap from the (DELTA_FIRST_SLICE-shifted) first fire is `MAX - DELTA_FIRST_SLICE`.
+        // Slot 0's block deadline is `T + delta_block + scaled_delta_timeout`, so
+        // the gap from the (DELTA_FIRST_SLICE-shifted) first fire is `delta_block - DELTA_FIRST_SLICE`.
         let next = timer_state.next_fire().unwrap();
         let actual_delta = next - next_fire;
-        assert_eq!(
-            actual_delta,
-            Duration::from_secs(MAX_TIMEOUT_SECS as u64) - DELTA_FIRST_SLICE
-        );
+        assert_eq!(actual_delta, delta_block - DELTA_FIRST_SLICE);
     }
 }
