@@ -40,7 +40,7 @@ enum TimerState {
         timeout: Instant,
         /// The maximum allowed time for producing the first slice.
         delta_first_slice: Duration,
-        /// Protocol slot time, used in [`TimerState::WaitDeltaBlock`].
+        /// Protocol slot time, used in [`TimerState::WaitForBlock`].
         delta_block: Duration,
     },
     /// Waiting for DELTA_TIMEOUT + i * DELTA_BLOCK for each block i in window.
@@ -112,7 +112,7 @@ impl TimerState {
                 }
                 let slot = *window.front().unwrap();
                 // Slot 0's block deadline is `T + delta_block + scaled_delta_timeout`;
-                // subtract the `delta_first_slice` paid up-front to `WaitDeltaTimeout`.
+                // subtract the `delta_first_slice` paid up-front to `WaitForFirstSlice`.
                 let new_timeout = timeout
                     .checked_add(*delta_block)
                     .and_then(|t| t.checked_sub(*delta_first_slice))
