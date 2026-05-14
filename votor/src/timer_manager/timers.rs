@@ -82,7 +82,8 @@ impl TimerState {
         // `DELTA_FIRST_SLICE + delta_timeout` after their window starts.
         let timeout = now
             .checked_add(scaled_delta_timeout)
-            .and_then(|t| t.checked_add(delta_first_slice))
+            .unwrap()
+            .checked_add(delta_first_slice)
             .unwrap();
         (
             Self::WaitForFirstSlice {
