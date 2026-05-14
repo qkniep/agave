@@ -115,7 +115,8 @@ impl TimerState {
                 // subtract the `delta_first_slice` paid up-front to `WaitForFirstSlice`.
                 let new_timeout = timeout
                     .checked_add(*delta_block)
-                    .and_then(|t| t.checked_sub(*delta_first_slice))
+                    .unwrap()
+                    .checked_sub(*delta_first_slice)
                     .unwrap();
                 *self = Self::WaitForBlock {
                     window: window.to_owned(),
