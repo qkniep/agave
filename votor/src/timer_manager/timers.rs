@@ -1,5 +1,8 @@
 use {
-    crate::{common::scale_standstill_timeout, event::VotorEvent, timer_manager::stats::TimerManagerStats},
+    crate::{
+        common::scale_standstill_timeout, event::VotorEvent,
+        timer_manager::stats::TimerManagerStats,
+    },
     crossbeam_channel::Sender,
     solana_clock::Slot,
     solana_runtime::leader_schedule_utils::last_of_consecutive_leader_slots,
@@ -155,13 +158,8 @@ impl Timers {
         delta_block: Duration,
     ) {
         assert_eq!(self.heap.len(), self.timers.len());
-        let (timer, next_fire) = TimerState::new(
-            slot,
-            self.delta_timeout,
-            delta_block,
-            now,
-            standstill_slot,
-        );
+        let (timer, next_fire) =
+            TimerState::new(slot, self.delta_timeout, delta_block, now, standstill_slot);
         // It is possible that this slot already has a timer set e.g. if there
         // are multiple ParentReady for the same slot.  Do not insert new timer then.
         let mut new_timer_inserted = false;
