@@ -791,7 +791,6 @@ impl EventHandler {
     /// The block must be:
     /// - Present in bank forks
     /// - Newer than the current root
-    /// - We must have already voted on bank.slot()
     /// - Bank is frozen and finished shredding
     /// - Block has a finalization certificate
     ///
@@ -813,7 +812,6 @@ impl EventHandler {
             .filter_map(|&(slot, block_id)| {
                 let bank = bank_forks_r.get(slot)?;
                 (slot > old_root
-                    && vctx.vote_history.voted(slot)
                     && bank.is_frozen()
                     && bank.block_id().is_some_and(|bid| bid == block_id))
                 .then_some(slot)
