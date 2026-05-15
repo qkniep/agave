@@ -289,8 +289,11 @@ impl RequestResponse for BlockIdRepairType {
                     return false;
                 }
 
-                let parent_info_leaf =
-                    hashv(&[&parent_slot.to_le_bytes(), parent_block_id.as_ref()]);
+                let parent_info_leaf = hashv(&[
+                    &parent_slot.to_le_bytes(),
+                    parent_block_id.as_ref(),
+                    &fec_set_count.to_le_bytes(),
+                ]);
                 merkle_tree::verify_merkle_proof(
                     parent_info_leaf,
                     *fec_set_count as usize,
