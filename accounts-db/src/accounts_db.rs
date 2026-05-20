@@ -43,7 +43,7 @@ use {
             StoreAccountsFrozenStats, StoreAccountsTiming, StoreAccountsUnfrozenStats,
             WriteAccountsToCacheStats,
         },
-        accounts_file::{AccountsFile, AccountsFileProvider, StorageAccess},
+        accounts_file::{AccountsFile, AccountsFileProvider},
         accounts_hash::{AccountLtHash, AccountsLtHash, ZERO_LAMPORT_ACCOUNT_LT_HASH},
         accounts_index::{
             AccountSecondaryIndexes, AccountsIndex, AccountsIndexRootsStats,
@@ -973,9 +973,6 @@ pub struct AccountsDb {
     /// storage format to use for new storages
     accounts_file_provider: AccountsFileProvider,
 
-    /// method to use for accessing storages
-    storage_access: StorageAccess,
-
     /// index scan filtering for shrinking
     scan_filter_for_shrinking: ScanFilter,
 
@@ -1129,7 +1126,6 @@ impl AccountsDb {
             write_cache_limit_bytes: accounts_db_config.write_cache_limit_bytes,
             partitioned_epoch_rewards_config: accounts_db_config.partitioned_epoch_rewards_config,
             exhaustively_verify_refcounts: accounts_db_config.exhaustively_verify_refcounts,
-            storage_access: accounts_db_config.storage_access,
             scan_filter_for_shrinking: accounts_db_config.scan_filter_for_shrinking,
             thread_pool_foreground,
             thread_pool_background,
@@ -1193,7 +1189,6 @@ impl AccountsDb {
             self.next_id(),
             size,
             self.accounts_file_provider,
-            self.storage_access,
         )
     }
 
@@ -2513,11 +2508,6 @@ impl AccountsDb {
         }
     }
 
-    #[cfg(feature = "dev-context-only-utils")]
-    pub fn set_storage_access(&mut self, storage_access: StorageAccess) {
-        self.storage_access = storage_access;
-    }
-
     pub(crate) fn get_unique_accounts_from_storage_for_shrink(
         &self,
         store: &AccountStorageEntry,
@@ -3004,7 +2994,7 @@ impl AccountsDb {
             .storage
             .get_slot_storage_entry_shrinking_in_progress_ok(slot)
         {
-            if let Some(new_storage) = storage.reopen_as_readonly(self.storage_access) {
+            if let Some(new_storage) = storage.reopen_as_readonly() {
                 // consider here the race condition of tx processing having looked up something in the index,
                 // which could return (slot, append vec id). We want the lookup for the storage to get a storage
                 // that works whether the lookup occurs before or after the replace call here.
@@ -3370,6 +3360,10 @@ impl AccountsDb {
         }
     }
 
+    /// Scans all accounts visible from `ancestors`, invoking `scan_func` for each.
+    /// Pre-scans the write cache to capture entries not yet flushed to the accounts index, then
+    /// deduplicates against the index scan, calling `scan_func` with the newest version of each
+    /// account
     pub(crate) fn scan_accounts<F>(
         &self,
         ancestors: &Ancestors,
@@ -3399,6 +3393,27 @@ impl AccountsDb {
             &max_root_ancestors
         };
 
+        // Step 1: Pre-scan the cache index to find the newest visible cached version of each
+        // pubkey. Hold the Arc<CachedAccount> to keep the data alive even if the cache flushes
+        // between now and step 3 (Arc clone is just a refcount bump).
+        let cached_pubkeys = self.accounts_cache.cached_pubkeys();
+        let mut cached_versions =
+            HashMap::with_capacity_and_hasher(cached_pubkeys.len(), PubkeyHasherBuilder::default());
+        for pubkey in cached_pubkeys {
+            if config.is_aborted() {
+                break;
+            }
+
+            if let Some((cached_account, slot, _)) =
+                self.accounts_cache.load_latest(&pubkey, ancestors)
+            {
+                cached_versions.insert(pubkey, (cached_account, slot));
+            }
+        }
+
+        // Step 2: Scan the accounts_index. For each pubkey, return the newest version found in
+        // either the storage or the cache. If both versions are the same, use the cached version
+        // to avoid a redundant load from storage.
         // Bound max_root by ancestors.min_slot() so that roots from slots
         // beyond the querying bank's ancestor chain are not visible.
         let mut max_root = scan_guard.max_root();
@@ -3409,6 +3424,13 @@ impl AccountsDb {
             ancestors,
             max_root,
             |pubkey, (account_info, slot)| {
+                if let Some((cached_account, cache_slot)) = cached_versions.remove(pubkey) {
+                    if cache_slot >= slot {
+                        scan_func(Some((pubkey, cached_account.account.clone(), cache_slot)));
+                        return;
+                    }
+                }
+
                 let mut account_accessor =
                     self.get_account_accessor(slot, pubkey, &account_info.storage_location());
 
@@ -3422,6 +3444,15 @@ impl AccountsDb {
             },
             config,
         );
+
+        // Step 3: Call scan_func on cache-only entries — pubkeys that exist in the cache but not
+        // in the accounts index at all.
+        for (pubkey, (cached_account, slot)) in cached_versions {
+            if config.is_aborted() {
+                break;
+            }
+            scan_func(Some((&pubkey, cached_account.account.clone(), slot)));
+        }
 
         // Check whether the bank was removed while the scan was in progress.
         if scan_guard.was_scan_corrupted() {
@@ -3479,19 +3510,14 @@ impl AccountsDb {
             if config.is_aborted() {
                 break;
             }
-            self.accounts_index.get_with_and_then(
-                &pubkey,
+            if let Some((account, slot)) = self.do_load(
                 ancestors,
-                true,
-                |(slot, account_info)| {
-                    let account_slot = self
-                        .get_account_accessor(slot, &pubkey, &account_info.storage_location())
-                        .get_loaded_account(|loaded_account| {
-                            (&pubkey, loaded_account.take_account(), slot)
-                        });
-                    scan_func(account_slot)
-                },
-            );
+                &pubkey,
+                LoadHint::Unspecified,
+                PopulateReadCache::False,
+            ) {
+                scan_func(Some((&pubkey, account, slot)));
+            }
         }
 
         // Check whether the bank was removed while the scan was in progress.
@@ -3988,6 +4014,18 @@ impl AccountsDb {
             self.read_index_for_accessor_or_load_slow(ancestors, pubkey, false)?;
         // Notice the subtle `?` at previous line, we bail out pretty early if missing.
 
+        if let Some((cached_account, cached_slot, _)) = &cache_result {
+            if *cached_slot >= slot {
+                // The write cache holds a version at a slot at least as new as what the
+                // index returned, so it represents the freshest visible value and can be
+                // returned directly without going through the storage accessor.
+                self.load_account_stats
+                    .num_loaded_from_write_cache
+                    .fetch_add(1, Ordering::Relaxed);
+                return Some((cached_account.account.clone(), *cached_slot));
+            }
+        }
+
         let in_write_cache = storage_location.is_cached();
         if !in_write_cache {
             let result = self.read_only_accounts_cache.load(*pubkey, slot);
@@ -4214,6 +4252,7 @@ impl AccountsDb {
     /// entries in the accounts index, cache entries, and any backing storage entries.
     ///
     /// This fn is to only be called by snapshot minimizer
+    #[cfg(feature = "dev-context-only-utils")]
     pub fn purge_slots_for_snapshot_minimizer<'a>(
         &self,
         removed_slots: impl Iterator<Item = &'a Slot> + Clone,
@@ -5489,6 +5528,8 @@ impl AccountsDb {
         let num_accounts_stored = accounts.len();
         let stats = &self.store_accounts_frozen_stats;
 
+        debug_assert!(self.accounts_index.is_alive_root(slot));
+
         // Flush the read cache if necessary. This will occur during shrink or clean
         let flush_read_cache_time = Measure::start("flush_read_cache");
         if self.read_only_accounts_cache.can_slot_be_in_cache(slot) {
@@ -5588,11 +5629,45 @@ impl AccountsDb {
         }
     }
 
+    /// Returns whether the latest version of pubkey from ancestors is zero-lamport
+    /// Returns `None` if the account doesn't exist
+    fn is_ancestor_zero_lamport(&self, pubkey: &Pubkey, ancestors: &Ancestors) -> Option<bool> {
+        if let Some((cached_account, cache_slot, status)) =
+            self.accounts_cache.load_latest(pubkey, ancestors)
+        {
+            let cache_is_zero_lamport = cached_account.account.lamports() == 0;
+            // When the slot isn't being flushed, the cache is definitely the newest
+            if matches!(status, SlotStatus::Ancestor | SlotStatus::UnflushedRoot) {
+                return Some(cache_is_zero_lamport);
+            }
+
+            // Slot is being flushed; a newer version may already exist in storage.
+            if let Some((index_slot, index_is_zero_lamport)) = self
+                .accounts_index
+                .get_with_and_then(pubkey, ancestors, true, |(slot, account)| {
+                    (slot, account.is_zero_lamport())
+                })
+            {
+                // Return the zero lamport status of the newest version between the cache and index
+                // If slots are the same it doesn't matter which is returned (They are identical)
+                if index_slot > cache_slot {
+                    return Some(index_is_zero_lamport);
+                }
+            }
+            Some(cache_is_zero_lamport)
+        } else {
+            self.accounts_index
+                .get_with_and_then(pubkey, ancestors, true, |(_, account)| {
+                    account.is_zero_lamport()
+                })
+        }
+    }
+
     // Stores accounts in the write cache. If an account is zero-lamport and not present in the
-    // index, there is no need to store it in the write cache as it will not effect the accounts
-    // hash. The function returns a BitVec indicating whether each account was stored in the cache.
-    // Ordering of account is important as duplicate pubkeys are possible. The last account in
-    // accounts_and_meta_to_store for each pubkey is stored in the write cache
+    // cache or index, there is no need to store it in the write cache as it will not affect the
+    // accounts hash. The function returns a BitVec indicating whether each account was stored in
+    // the cache. Ordering of accounts is important as duplicate pubkeys are possible. The last
+    // account in accounts_and_meta_to_store for each pubkey is stored in the write cache.
     fn write_accounts_to_cache<'a, 'b>(
         &self,
         slot: Slot,
@@ -5618,12 +5693,7 @@ impl AccountsDb {
                     return;
                 }
                 if account.is_zero_lamport() {
-                    match self.accounts_index.get_with_and_then(
-                        pubkey,
-                        ancestors,
-                        true,
-                        |(_, info)| info.is_zero_lamport(),
-                    ) {
+                    match self.is_ancestor_zero_lamport(pubkey, ancestors) {
                         None => {
                             stats.num_ephemeral_accounts_skipped += 1;
                             return;
@@ -6635,11 +6705,6 @@ impl AccountsDb {
     /// This is useful for testing clean algorithms.
     pub fn get_len_of_slots_with_uncleaned_pubkeys(&self) -> usize {
         self.uncleaned_pubkeys.len()
-    }
-
-    #[cfg(test)]
-    pub fn storage_access(&self) -> StorageAccess {
-        self.storage_access
     }
 
     /// Call clean_accounts() with the common parameters that tests/benches use.

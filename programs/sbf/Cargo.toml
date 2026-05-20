@@ -20,7 +20,6 @@ members = [
     "rust/alloc",
     "rust/alt_bn128",
     "rust/alt_bn128_compression",
-    "rust/big_mod_exp",
     "rust/call_args",
     "rust/call_depth",
     "rust/caller_access",
@@ -79,23 +78,7 @@ authors = ["Anza Maintainers <maintainers@anza.xyz>"]
 repository = "https://github.com/anza-xyz/agave"
 homepage = "https://anza.xyz"
 license = "Apache-2.0"
-edition = "2021"
-
-[workspace.lints.rust]
-# List of rust-2024-compatibility lints that are already satisfied
-# See https://doc.rust-lang.org/rustc/lints/groups.html
-boxed_slice_into_iter = "deny"
-dependency_on_unit_never_type_fallback = "deny"
-deprecated_safe_2024 = "deny"
-impl_trait_overcaptures = "deny"
-missing_unsafe_on_extern = "deny"
-never_type_fallback_flowing_into_unsafe = "deny"
-rust_2024_guarded_string_incompatible_syntax = "deny"
-rust_2024_incompatible_pat = "deny"
-rust_2024_prelude_collisions = "deny"
-static_mut_refs = "deny"
-unsafe_attr_outside_unsafe = "deny"
-unsafe_op_in_unsafe_fn = "deny"
+edition = "2024"
 
 [workspace.lints.rust.unexpected_cfgs]
 level = "warn"
@@ -123,14 +106,13 @@ serde_json = "1.0.149"
 solana-account-info = "=3.1.1"
 solana-account-view = "=2.0.0"
 solana-address = "=2.6.0"
-solana-big-mod-exp = "=3.0.0"
 solana-blake3-hasher = { version = "=3.1.0", features = ["blake3"] }
 solana-bn254 = "=3.2.1"
 solana-clock = { version = "=3.0.1", features = ["serde", "sysvar"] }
 solana-compute-budget = { path = "../../compute-budget", version = "=4.2.0-alpha.0" }
 solana-compute-budget-instruction = { path = "../../compute-budget-instruction", version = "=4.2.0-alpha.0" }
 solana-cpi = "=3.1.0"
-solana-curve25519 = "=4.0.0"
+solana-curve25519 = "=4.0.1"
 solana-define-syscall = "=3.0.0"
 solana-fee = { path = "../../fee", version = "=4.2.0-alpha.0" }
 solana-hash = { version = "=4.3.0", features = ["bytemuck", "serde", "std"] }
