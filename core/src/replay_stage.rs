@@ -138,6 +138,24 @@ const MAX_REPAIR_RETRY_LOOP_ATTEMPTS: usize = 10;
 // Give at least 4 leaders the chance to pack our vote
 const REFRESH_VOTE_BLOCKHEIGHT: usize = 16;
 
+/// Age beyond which a deferred [`PendingSwitch`] is treated as stalled and reported.
+const PENDING_SWITCH_STALL_WARN_THRESHOLD: Duration = Duration::from_secs(5);
+/// Minimum interval between stall warn/datapoint emissions for the same pending switch.
+const PENDING_SWITCH_STALL_WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// A deferred switch-bank request awaiting repair of its ancestor chain.
+///
+/// `since` is preserved across re-receives of the same `(slot, block_id)` target so the age
+/// metric reflects how long this specific target has been stuck, not the most recent
+/// `LatestSwitchRequest` arrival.
+#[derive(Debug)]
+struct PendingSwitch {
+    slot: Slot,
+    block_id: Hash,
+    since: Instant,
+    last_warned: Option<Instant>,
+}
+
 #[derive(PartialEq, Eq, Debug)]
 pub enum HeaviestForkFailures {
     LockedOut(u64),
@@ -2359,7 +2377,7 @@ impl ReplayStage {
     fn process_switch_bank_events(
         my_pubkey: &Pubkey,
         latest_switch_request: &LatestSwitchRequest,
-        pending_switch: &mut Option<(Slot, Hash)>,
+        pending_switch: &mut Option<PendingSwitch>,
         blockstore: &Blockstore,
         bank_forks: &RwLock<BankForks>,
         progress: &mut ProgressMap,
@@ -2373,19 +2391,41 @@ impl ReplayStage {
             .filter(|(slot, _)| *slot > root)
         {
             // Overwrite the pending switch, later switches take precedence
-            if Some(slot) >= pending_switch.map(|(slot, _)| slot) {
-                if let Some(prev_switch_request) = pending_switch.replace((slot, block_id)) {
-                    trace!(
-                        "{my_pubkey}: Overwriting previous switch request {prev_switch_request:?} \
-                         with ({slot}, {block_id})"
-                    );
-                } else {
-                    trace!("{my_pubkey}: Received switch request in {slot} to {block_id}");
+            if Some(slot) >= pending_switch.as_ref().map(|p| p.slot) {
+                // Preserve `since` if the target is unchanged so the age metric tracks how long
+                // this specific target has been stuck.
+                let since = pending_switch
+                    .as_ref()
+                    .filter(|p| p.slot == slot && p.block_id == block_id)
+                    .map(|p| p.since)
+                    .unwrap_or_else(Instant::now);
+                let last_warned = pending_switch
+                    .as_ref()
+                    .filter(|p| p.slot == slot && p.block_id == block_id)
+                    .and_then(|p| p.last_warned);
+                let prev = pending_switch.replace(PendingSwitch {
+                    slot,
+                    block_id,
+                    since,
+                    last_warned,
+                });
+                match prev {
+                    Some(prev) if prev.slot != slot || prev.block_id != block_id => {
+                        trace!(
+                            "{my_pubkey}: Overwriting previous switch request ({}, {}) \
+                             with ({slot}, {block_id})",
+                            prev.slot, prev.block_id,
+                        );
+                    }
+                    None => {
+                        trace!("{my_pubkey}: Received switch request in {slot} to {block_id}");
+                    }
+                    _ => {}
                 }
             }
         };
 
-        let Some((slot, block_id)) = *pending_switch else {
+        let Some(PendingSwitch { slot, block_id, .. }) = *pending_switch else {
             return Ok(());
         };
 
@@ -2414,6 +2454,12 @@ impl ReplayStage {
                 trace!(
                     "{my_pubkey}: Waiting for repair, deferring switch to block {ancestor_slot} \
                      {ancestor_block_id}"
+                );
+                Self::maybe_report_pending_switch_stall(
+                    my_pubkey,
+                    pending_switch.as_mut().expect("pending_switch is Some"),
+                    ancestor_slot,
+                    ancestor_block_id,
                 );
                 // Still waiting on repair to finish - keep pending request
                 return Ok(());
@@ -2474,6 +2520,44 @@ impl ReplayStage {
         *pending_switch = None;
 
         Ok(())
+    }
+
+    /// Warn and emit a datapoint when a deferred switch has been waiting on repair too long.
+    /// Throttled to once per [`PENDING_SWITCH_STALL_WARN_INTERVAL`] per pending target.
+    fn maybe_report_pending_switch_stall(
+        my_pubkey: &Pubkey,
+        pending: &mut PendingSwitch,
+        waiting_ancestor_slot: Slot,
+        waiting_ancestor_block_id: Hash,
+    ) {
+        let age = pending.since.elapsed();
+        if age < PENDING_SWITCH_STALL_WARN_THRESHOLD {
+            return;
+        }
+        if pending
+            .last_warned
+            .is_some_and(|t| t.elapsed() < PENDING_SWITCH_STALL_WARN_INTERVAL)
+        {
+            return;
+        }
+        warn!(
+            "{my_pubkey}: Switch to ({}, {}) deferred for {:?} awaiting repair of ancestor \
+             ({waiting_ancestor_slot}, {waiting_ancestor_block_id})",
+            pending.slot, pending.block_id, age,
+        );
+        datapoint_warn!(
+            "replay_stage-pending_switch_stalled",
+            ("slot", pending.slot, i64),
+            ("block_id", pending.block_id.to_string(), String),
+            ("age_ms", age.as_millis() as i64, i64),
+            ("waiting_ancestor_slot", waiting_ancestor_slot, i64),
+            (
+                "waiting_ancestor_block_id",
+                waiting_ancestor_block_id.to_string(),
+                String
+            ),
+        );
+        pending.last_warned = Some(Instant::now());
     }
 
     /// For slots to clear, clear the bank from progress, bank forks, and recycle the async verification
