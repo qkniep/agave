@@ -399,8 +399,7 @@ mod tests {
         );
 
         // The first timeout should be capped at MAX_STANDSTILL_TIMEOUT (+ unscaled DELTA_FIRST_SLICE).
-        let expected_first_fire =
-            now + crate::common::MAX_STANDSTILL_TIMEOUT + DELTA_FIRST_SLICE;
+        let expected_first_fire = now + crate::common::MAX_STANDSTILL_TIMEOUT + DELTA_FIRST_SLICE;
         assert_eq!(next_fire, expected_first_fire);
 
         // Progress the timer to get TimeoutCrashedLeader

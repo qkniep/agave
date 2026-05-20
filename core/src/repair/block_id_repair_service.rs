@@ -411,9 +411,10 @@ impl BlockIdRepairService {
         // while finalization is stuck.
         let current_slot = sharable_banks.working().slot();
         let standstill_slot = context.repair_info.standstill_signal.get();
-        let retry_ttl_ms =
-            u64::try_from(scale_standstill_timeout(2 * DELTA, current_slot, standstill_slot).as_millis())
-                .unwrap_or(u64::MAX);
+        let retry_ttl_ms = u64::try_from(
+            scale_standstill_timeout(2 * DELTA, current_slot, standstill_slot).as_millis(),
+        )
+        .unwrap_or(u64::MAX);
 
         // Clean up old request tracking
         state.requested_blocks.retain(|(slot, _)| *slot > root);
@@ -1441,7 +1442,12 @@ mod tests {
         assert!(state.pending_repair_requests.is_empty());
 
         // With the unscaled timeout, the same request IS considered expired.
-        BlockIdRepairService::retry_timed_out_requests(&blockstore, &mut state, now, unscaled_ttl_ms);
+        BlockIdRepairService::retry_timed_out_requests(
+            &blockstore,
+            &mut state,
+            now,
+            unscaled_ttl_ms,
+        );
         assert!(state.sent_requests.is_empty());
         assert_eq!(state.pending_repair_requests.len(), 1);
     }

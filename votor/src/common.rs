@@ -160,7 +160,11 @@ pub fn calculate_timeout_multiplier(slot: Slot, standstill_slot: Option<Slot>) -
 
 /// Scale a base timeout by the standstill multiplier and cap at
 /// [`MAX_STANDSTILL_TIMEOUT`].
-pub fn scale_standstill_timeout(base: Duration, slot: Slot, standstill_slot: Option<Slot>) -> Duration {
+pub fn scale_standstill_timeout(
+    base: Duration,
+    slot: Slot,
+    standstill_slot: Option<Slot>,
+) -> Duration {
     let multiplier = calculate_timeout_multiplier(slot, standstill_slot);
     let scaled = base.as_secs_f64() * multiplier;
     let capped = scaled.min(MAX_STANDSTILL_TIMEOUT.as_secs_f64());
