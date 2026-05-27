@@ -46,6 +46,7 @@
 use {
     crate::{
         commitment::CommitmentAggregationData,
+        common::StandstillSignal,
         consensus_metrics::{
             ConsensusMetrics, ConsensusMetricsEventReceiver, ConsensusMetricsEventSender,
         },

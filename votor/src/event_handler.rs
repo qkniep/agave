@@ -3,7 +3,8 @@
 
 use {
     crate::{
-        commitment::{CommitmentType, update_commitment_cache},
+        commitment::{update_commitment_cache, CommitmentType},
+        common::StandstillSignal,
         consensus_metrics::ConsensusMetricsEvent,
         event::{
             CompletedBlock, LatestSwitchRequest, RepairEvent, RepairEventSender, SwitchBankEvent,
@@ -15,11 +16,11 @@ use {
         timer_manager::TimerManager,
         vote_history::{VoteHistory, VoteHistoryError},
         voting_service::BLSOp,
-        voting_utils::{VoteError, VotingContext, generate_vote_message},
+        voting_utils::{generate_vote_message, VoteError, VotingContext},
         votor::SharedContext,
     },
     agave_votor_messages::{consensus_message::Block, migration::MigrationStatus, vote::Vote},
-    crossbeam_channel::{RecvError, SendError, TrySendError, select},
+    crossbeam_channel::{select, RecvError, SendError, TrySendError},
     parking_lot::RwLock,
     solana_clock::Slot,
     solana_hash::Hash,
@@ -35,8 +36,8 @@ use {
     std::{
         collections::{BTreeMap, BTreeSet},
         sync::{
-            Arc,
             atomic::{AtomicBool, Ordering},
+            Arc,
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
@@ -604,8 +605,8 @@ impl EventHandler {
         if *my_pubkey != new_pubkey || vctx.vote_history.node_pubkey != new_pubkey {
             let my_old_pubkey = vctx.vote_history.node_pubkey;
             *my_pubkey = new_pubkey;
-            // The vote history file for the new identity must exist for set-identity to succeed
-            vctx.vote_history = VoteHistory::restore(ctx.vote_history_storage.as_ref(), my_pubkey)?;
+            vctx.vote_history = VoteHistory::restore(ctx.vote_history_storage.as_ref(), my_pubkey)
+                .unwrap_or_else(|_| VoteHistory::new(new_pubkey, 0));
             vctx.identity_keypair = new_identity;
             warn!("set-identity: from {my_old_pubkey} to {my_pubkey}");
         }
@@ -910,10 +911,10 @@ mod tests {
             voting_service::BLSOp,
         },
         agave_votor_messages::{
-            consensus_message::{BLS_KEYPAIR_DERIVE_SEED, ConsensusMessage, VoteMessage},
+            consensus_message::{ConsensusMessage, VoteMessage, BLS_KEYPAIR_DERIVE_SEED},
             vote::Vote,
         },
-        crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded},
+        crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError},
         parking_lot::RwLock as PlRwLock,
         solana_bls_signatures::{
             keypair::Keypair as BLSKeypair, signature::Signature as BLSSignature,
@@ -930,7 +931,7 @@ mod tests {
             bank_forks::BankForks,
             bank_forks_controller::{BankForksController, BankForksControllerError},
             genesis_utils::{
-                ValidatorVoteKeypairs, create_genesis_config_with_alpenglow_vote_accounts,
+                create_genesis_config_with_alpenglow_vote_accounts, ValidatorVoteKeypairs,
             },
             installed_scheduler_pool::BankWithScheduler,
         },
@@ -1405,11 +1406,9 @@ mod tests {
             let saved_vote_history =
                 SavedVoteHistory::new(&VoteHistory::new(new_identity.pubkey(), 0), &new_identity)
                     .unwrap();
-            assert!(
-                file_vote_history_storage
-                    .store(&SavedVoteHistoryVersions::from(saved_vote_history),)
-                    .is_ok()
-            );
+            assert!(file_vote_history_storage
+                .store(&SavedVoteHistoryVersions::from(saved_vote_history),)
+                .is_ok());
             self.cluster_info
                 .set_keypair(Arc::new(new_identity.insecure_clone()));
 

@@ -24,7 +24,7 @@ use {
         shred_fetch_stage::SHRED_FETCH_CHANNEL_SIZE,
     },
     agave_votor::{
-        common::DELTA,
+        common::{DELTA, scale_standstill_timeout},
         event::{RepairEvent, RepairEventReceiver},
         standstill::scale_standstill_timeout,
     },

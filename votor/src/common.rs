@@ -4,7 +4,12 @@ use {
         fraction::Fraction,
         vote::{Vote, VoteType},
     },
-    std::time::Duration,
+    solana_clock::Slot,
+    solana_leader_schedule::NUM_CONSECUTIVE_LEADER_SLOTS,
+    std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
+    },
 };
 
 // Core consensus types and constants

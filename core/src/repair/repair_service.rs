@@ -13,8 +13,8 @@ use {
             outstanding_requests::OutstandingRequests,
             repair_weight::RepairWeight,
             serve_repair::{
-                REPAIR_PEERS_CACHE_CAPACITY, RepairPeers, RepairProtocol, RepairRequestHeader,
-                ServeRepair, ShredRepairType,
+                RepairPeers, RepairProtocol, RepairRequestHeader, ServeRepair, ShredRepairType,
+                REPAIR_PEERS_CACHE_CAPACITY,
             },
         },
     },
@@ -40,17 +40,17 @@ use {
         bank::Bank,
         bank_forks::{BankForks, SharableBanks},
     },
-    solana_streamer::sendmmsg::{SendPktsError, batch_send},
+    solana_streamer::sendmmsg::{batch_send, SendPktsError},
     solana_time_utils::timestamp,
     std::{
-        collections::{HashMap, HashSet, hash_map::Entry},
+        collections::{hash_map::Entry, HashMap, HashSet},
         iter::Iterator,
         net::{SocketAddr, UdpSocket},
         sync::{
-            Arc, RwLock,
             atomic::{AtomicBool, Ordering},
+            Arc, RwLock,
         },
-        thread::{self, Builder, JoinHandle, sleep},
+        thread::{self, sleep, Builder, JoinHandle},
         time::{Duration, Instant},
     },
 };
@@ -1403,13 +1403,13 @@ mod test {
         solana_keypair::Keypair,
         solana_ledger::{
             blockstore::{
-                Blockstore, make_chaining_slot_entries, make_many_slot_entries, make_slot_entries,
+                make_chaining_slot_entries, make_many_slot_entries, make_slot_entries, Blockstore,
             },
-            genesis_utils::{GenesisConfigInfo, create_genesis_config},
+            genesis_utils::{create_genesis_config, GenesisConfigInfo},
             get_tmp_ledger_path_auto_delete,
             shred::max_ticks_per_n_shreds,
         },
-        solana_net_utils::{SocketAddrSpace, sockets::bind_to_localhost_unique},
+        solana_net_utils::{sockets::bind_to_localhost_unique, SocketAddrSpace},
         solana_perf::packet::PacketRef,
         solana_runtime::bank::Bank,
         solana_signer::Signer,
@@ -2005,13 +2005,11 @@ mod test {
             &RwLock::new(OutstandingRequests::default()),
             &identity_keypair,
         );
-        assert!(
-            duplicate_slot_repair_statuses
-                .get(&dead_slot)
-                .unwrap()
-                .repair_pubkey_and_addr
-                .is_none()
-        );
+        assert!(duplicate_slot_repair_statuses
+            .get(&dead_slot)
+            .unwrap()
+            .repair_pubkey_and_addr
+            .is_none());
         assert!(duplicate_slot_repair_statuses.contains_key(&dead_slot));
 
         // Give the slot a repair address
