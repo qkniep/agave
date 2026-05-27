@@ -107,6 +107,28 @@ impl AccountStorageEntry {
     }
 }
 
+fn create_store_for_shrink_tests(
+    accounts_db: &AccountsDb,
+    slot: Slot,
+    file_size: u64,
+    alive_bytes: usize,
+    num_zero_lamport_single_ref_accounts: usize,
+) -> Arc<AccountStorageEntry> {
+    let store = Arc::new(AccountStorageEntry::new(
+        Path::new(""),
+        slot,
+        slot as AccountsFileId,
+        file_size,
+        AccountsFileProvider::AppendVec,
+    ));
+    accounts_db.storage.insert(Arc::clone(&store));
+    store.add_accounts(num_zero_lamport_single_ref_accounts.max(1), alive_bytes);
+    for offset in 0..num_zero_lamport_single_ref_accounts {
+        store.insert_zero_lamport_single_ref_account_offset(offset);
+    }
+    store
+}
+
 /// Macro to define tests for all permutations of accounts-db configs
 ///
 /// E.g. account storage file format
@@ -258,8 +280,6 @@ pub(crate) fn append_single_account_with_default_hash(
             slot,
             slot,
             pubkey,
-            account,
-            &AccountSecondaryIndexes::default(),
             account_info,
             &mut ReclaimsSlotList::new(),
             UpsertReclaim::IgnoreReclaims,
@@ -338,10 +358,7 @@ define_accounts_db_test!(test_accountsdb_add_root, |db| {
     db.store_for_tests((0, [(&key, &account0)].as_slice()));
     db.add_root(0);
     let ancestors = Ancestors::from(vec![1]);
-    assert_eq!(
-        db.load_without_fixed_root(&ancestors, &key),
-        Some((account0, 0))
-    );
+    assert_eq!(db.do_load_for_tests(&ancestors, &key), Some((account0, 0)));
 });
 
 define_accounts_db_test!(test_accountsdb_latest_ancestor, |db| {
@@ -355,13 +372,13 @@ define_accounts_db_test!(test_accountsdb_latest_ancestor, |db| {
 
     let ancestors = Ancestors::from(vec![1]);
     assert_eq!(
-        &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
+        &db.do_load_for_tests(&ancestors, &key).unwrap().0,
         &account1
     );
 
     let ancestors = Ancestors::from(vec![1, 0]);
     assert_eq!(
-        &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
+        &db.do_load_for_tests(&ancestors, &key).unwrap().0,
         &account1
     );
 
@@ -392,13 +409,13 @@ define_accounts_db_test!(test_accountsdb_latest_ancestor_with_root, |db| {
 
     let ancestors = Ancestors::from(vec![1]);
     assert_eq!(
-        &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
+        &db.do_load_for_tests(&ancestors, &key).unwrap().0,
         &account1
     );
 
     let ancestors = Ancestors::from(vec![1, 0]);
     assert_eq!(
-        &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
+        &db.do_load_for_tests(&ancestors, &key).unwrap().0,
         &account1
     );
 });
@@ -428,29 +445,23 @@ define_accounts_db_test!(test_accountsdb_root_one_slot, |db| {
     // at the Accounts level)
     let ancestors = Ancestors::from(vec![0, 1]);
     assert_eq!(
-        &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
+        &db.do_load_for_tests(&ancestors, &key).unwrap().0,
         &account1
     );
 
     // we should see 1 token in slot 2
     let ancestors = Ancestors::from(vec![0, 2]);
     assert_eq!(
-        &db.load_without_fixed_root(&ancestors, &key).unwrap().0,
+        &db.do_load_for_tests(&ancestors, &key).unwrap().0,
         &account0
     );
 
     db.add_root(0);
 
     let ancestors = Ancestors::from(vec![1]);
-    assert_eq!(
-        db.load_without_fixed_root(&ancestors, &key),
-        Some((account1, 1))
-    );
+    assert_eq!(db.do_load_for_tests(&ancestors, &key), Some((account1, 1)));
     let ancestors = Ancestors::from(vec![2]);
-    assert_eq!(
-        db.load_without_fixed_root(&ancestors, &key),
-        Some((account0, 0))
-    ); // original value
+    assert_eq!(db.do_load_for_tests(&ancestors, &key), Some((account0, 0))); // original value
 });
 
 define_accounts_db_test!(test_accountsdb_add_root_many, |db| {
@@ -459,9 +470,7 @@ define_accounts_db_test!(test_accountsdb_add_root_many, |db| {
     for _ in 1..100 {
         let idx = rng().random_range(0..99);
         let ancestors = Ancestors::from(vec![0]);
-        let account = db
-            .load_without_fixed_root(&ancestors, &pubkeys[idx])
-            .unwrap();
+        let account = db.do_load_for_tests(&ancestors, &pubkeys[idx]).unwrap();
         let default_account = AccountSharedData::from(Account {
             lamports: (idx + 1) as u64,
             ..Account::default()
@@ -475,13 +484,9 @@ define_accounts_db_test!(test_accountsdb_add_root_many, |db| {
     for _ in 1..100 {
         let idx = rng().random_range(0..99);
         let ancestors = Ancestors::from(vec![0]);
-        let account0 = db
-            .load_without_fixed_root(&ancestors, &pubkeys[idx])
-            .unwrap();
+        let account0 = db.do_load_for_tests(&ancestors, &pubkeys[idx]).unwrap();
         let ancestors = Ancestors::from(vec![1]);
-        let account1 = db
-            .load_without_fixed_root(&ancestors, &pubkeys[idx])
-            .unwrap();
+        let account1 = db.do_load_for_tests(&ancestors, &pubkeys[idx]).unwrap();
         let default_account = AccountSharedData::from(Account {
             lamports: (idx + 1) as u64,
             ..Account::default()
@@ -543,15 +548,9 @@ define_accounts_db_test!(test_accounts_unsquashed, |db0| {
     // masking accounts is done at the Accounts level, at accountsDB we see
     // original account
     let ancestors = Ancestors::from(vec![0, 1]);
-    assert_eq!(
-        db0.load_without_fixed_root(&ancestors, &key),
-        Some((account1, 1))
-    );
+    assert_eq!(db0.do_load_for_tests(&ancestors, &key), Some((account1, 1)));
     let ancestors = Ancestors::from(vec![0]);
-    assert_eq!(
-        db0.load_without_fixed_root(&ancestors, &key),
-        Some((account0, 0))
-    );
+    assert_eq!(db0.do_load_for_tests(&ancestors, &key), Some((account0, 0)));
 });
 
 /// Test to verify that reclaiming old storages during flush works correctly.
@@ -603,8 +602,9 @@ fn test_flush_slots_with_reclaim_old_slots() {
 
     accounts.accounts_index.add_root(new_slot);
 
-    // Flushing this storage directly using _store_accounts_frozen. This is done to pass in UpsertReclaim::ReclaimOldSlots
-    accounts._store_accounts_frozen(
+    // Flushing this storage directly using store_accounts_for_flush. This is done to pass in
+    // UpsertReclaim::ReclaimOldSlots
+    accounts.store_accounts_for_flush(
         (new_slot, &accounts_list[..]),
         &storage,
         UpsertReclaim::ReclaimOldSlots,
@@ -647,7 +647,7 @@ define_accounts_db_test!(test_remove_unrooted_slot_cached, |db| {
 
     // Purge the slot
     db.remove_unrooted_slots(&[(unrooted_slot, unrooted_bank_id)]);
-    assert!(db.load_without_fixed_root(&ancestors, &key).is_none());
+    assert!(db.do_load_for_tests(&ancestors, &key).is_none());
     assert!(db.accounts_cache.slot_cache(unrooted_slot).is_none());
     assert!(db.storage.get_slot_storage_entry(unrooted_slot).is_none());
     assert!(!db.contains(&key));
@@ -674,7 +674,7 @@ define_accounts_db_test!(test_remove_slot_snapshot_minimizer, |db| {
 
     // Purge the slot
     db.purge_slots_for_snapshot_minimizer([(&rooted_slot)].into_iter());
-    assert!(db.load_without_fixed_root(&ancestors, &key).is_none());
+    assert!(db.do_load_for_tests(&ancestors, &key).is_none());
     assert!(db.accounts_cache.slot_cache(rooted_slot).is_none());
     assert!(db.storage.get_slot_storage_entry(rooted_slot).is_none());
     assert!(!db.contains(&key));
@@ -684,15 +684,14 @@ fn update_accounts(accounts: &AccountsDb, pubkeys: &[Pubkey], slot: Slot, range:
     for _ in 1..1000 {
         let idx = rng().random_range(0..range);
         let ancestors = Ancestors::from(vec![slot]);
-        if let Some((mut account, _)) = accounts.load_without_fixed_root(&ancestors, &pubkeys[idx])
-        {
+        if let Some((mut account, _)) = accounts.do_load_for_tests(&ancestors, &pubkeys[idx]) {
             account.checked_add_lamports(1).unwrap();
             accounts.store_for_tests((slot, [(&pubkeys[idx], &account)].as_slice()));
             if account.is_zero_lamport() {
                 let ancestors = Ancestors::from(vec![slot]);
                 assert!(
                     accounts
-                        .load_without_fixed_root(&ancestors, &pubkeys[idx])
+                        .do_load_for_tests(&ancestors, &pubkeys[idx])
                         .is_none()
                 );
             } else {
@@ -713,7 +712,7 @@ fn test_account_one() {
     let mut pubkeys: Vec<Pubkey> = vec![];
     db.create_account(&mut pubkeys, 0, 1, 0, 0);
     let ancestors = Ancestors::from(vec![0]);
-    let account = db.load_without_fixed_root(&ancestors, &pubkeys[0]).unwrap();
+    let account = db.do_load_for_tests(&ancestors, &pubkeys[0]).unwrap();
     let default_account = AccountSharedData::from(Account {
         lamports: 1,
         ..Account::default()
@@ -756,7 +755,7 @@ fn test_account_grow_many() {
     for (i, key) in keys.iter().enumerate() {
         assert_eq!(
             accounts
-                .load_without_fixed_root(&ancestors, key)
+                .do_load_for_tests(&ancestors, key)
                 .unwrap()
                 .0
                 .lamports(),
@@ -805,17 +804,11 @@ fn test_account_grow() {
         }
         let ancestors = Ancestors::from(vec![0]);
         assert_eq!(
-            accounts
-                .load_without_fixed_root(&ancestors, &pubkey1)
-                .unwrap()
-                .0,
+            accounts.do_load_for_tests(&ancestors, &pubkey1).unwrap().0,
             account1
         );
         assert_eq!(
-            accounts
-                .load_without_fixed_root(&ancestors, &pubkey2)
-                .unwrap()
-                .0,
+            accounts.do_load_for_tests(&ancestors, &pubkey2).unwrap().0,
             account2
         );
 
@@ -829,17 +822,11 @@ fn test_account_grow() {
             }
             let ancestors = Ancestors::from(vec![0]);
             assert_eq!(
-                accounts
-                    .load_without_fixed_root(&ancestors, &pubkey1)
-                    .unwrap()
-                    .0,
+                accounts.do_load_for_tests(&ancestors, &pubkey1).unwrap().0,
                 account1
             );
             assert_eq!(
-                accounts
-                    .load_without_fixed_root(&ancestors, &pubkey2)
-                    .unwrap()
-                    .0,
+                accounts.do_load_for_tests(&ancestors, &pubkey2).unwrap().0,
                 account2
             );
             if flush {
@@ -1175,6 +1162,165 @@ fn test_shrink_zero_lamport_single_ref_account() {
             accounts.storage.get_slot_storage_entry(slot).is_some(),
             "{latest_full_snapshot_slot:?}"
         );
+    }
+}
+
+/// unit test for `alive_bytes_after_shrink()`
+///
+/// Check all the permutations of latest full snapshot slot w.r.t. if/how
+/// zero lamport single ref accounts are counted as alive bytes or not.
+#[test]
+fn test_alive_bytes_after_shrink() {
+    let accounts_db = AccountsDb::new_single_for_tests();
+    let slot = 5;
+    // note the initial alive bytes should be big enough so that subtracting
+    // all the zero lamport single ref accounts does not saturate at zero.
+    let initial_alive_bytes = 123_456;
+    let store = create_store_for_shrink_tests(
+        &accounts_db,
+        slot,
+        4096, // <-- file size
+        initial_alive_bytes,
+        2, // <-- num zero lamport single ref accounts
+    );
+
+    // test case: latest full snapshot slot is None -- ZLSR accounts are dead
+    {
+        // latest full snapshot slot starts off as None
+        assert!(accounts_db.latest_full_snapshot_slot().is_none());
+
+        // ensure ZLSR accounts are dead bytes
+        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
+        assert!(alive_bytes_after_shrink1 < initial_alive_bytes);
+
+        // add a ZLSR account, and ensure alive bytes reduces
+        store.insert_zero_lamport_single_ref_account_offset(2);
+        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
+        assert!(alive_bytes_after_shrink2 < alive_bytes_after_shrink1);
+    }
+
+    // test case: slot > latest full snapshot -- ZLSR accounts are alive
+    {
+        accounts_db.set_latest_full_snapshot_slot(slot - 1);
+
+        // ensure ZLSR accounts are *not* dead bytes
+        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
+        assert_eq!(alive_bytes_after_shrink1, initial_alive_bytes);
+
+        // add a ZLSR account, and ensure alive bytes is unchanged
+        store.insert_zero_lamport_single_ref_account_offset(3);
+        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
+        assert_eq!(alive_bytes_after_shrink2, initial_alive_bytes);
+    }
+
+    // test case: slot == latest full snapshot -- ZLSR accounts are dead
+    {
+        accounts_db.set_latest_full_snapshot_slot(slot);
+
+        // ensure ZLSR accounts are dead bytes
+        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
+        assert!(alive_bytes_after_shrink1 < initial_alive_bytes);
+
+        // add a ZLSR account, and ensure alive bytes reduces
+        store.insert_zero_lamport_single_ref_account_offset(4);
+        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
+        assert!(alive_bytes_after_shrink2 < alive_bytes_after_shrink1);
+    }
+
+    // test case: slot < latest full snapshot -- ZLSR accounts are dead
+    {
+        accounts_db.set_latest_full_snapshot_slot(slot + 1);
+
+        // ensure ZLSR accounts are dead bytes
+        let alive_bytes_after_shrink1 = accounts_db.alive_bytes_after_shrink(&store);
+        assert!(alive_bytes_after_shrink1 < initial_alive_bytes);
+
+        // add a ZLSR account, and ensure alive bytes reduces
+        store.insert_zero_lamport_single_ref_account_offset(5);
+        let alive_bytes_after_shrink2 = accounts_db.alive_bytes_after_shrink(&store);
+        assert!(alive_bytes_after_shrink2 < alive_bytes_after_shrink1);
+    }
+}
+
+/// Ensure that shrinking a storage...
+/// * with zero lamport single ref accounts
+/// * in a slot *older* than the latest full snapshot slot
+///
+/// Results in...
+/// * the zero lamport single ref accounts *not* in the shrunk storage
+/// * the expected number of alive bytes
+#[test]
+fn test_alive_bytes_after_shrink_with_zero_lamport_single_ref_accounts() {
+    let accounts_db = AccountsDb::new_single_for_tests();
+    let slot = 1;
+    let dead_account = AccountSharedData::new(0, 123, &Pubkey::default());
+    let dead_pubkeys = [
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+        Pubkey::new_unique(),
+    ];
+    let alive_account = AccountSharedData::new(11, 17, &Pubkey::default());
+    let alive_pubkey = Pubkey::new_unique();
+
+    accounts_db.store_for_tests((
+        slot,
+        [
+            (&dead_pubkeys[0], &dead_account),
+            (&dead_pubkeys[1], &dead_account),
+            (&dead_pubkeys[2], &dead_account),
+            (&alive_pubkey, &alive_account),
+        ]
+        .as_slice(),
+    ));
+    accounts_db.add_root_and_flush_write_cache(slot);
+
+    // We must set the latest full snapshot slot to `slot` or greater
+    // to ensure that ZLSR accounts are treated as dead for `shrink`.
+    accounts_db.set_latest_full_snapshot_slot(slot);
+
+    let storage = accounts_db.get_storage_for_slot(slot).unwrap();
+    accounts_db.accounts_index.scan(
+        dead_pubkeys.iter(),
+        |_pubkey, slots_refs| {
+            let (slot_list, ref_count) = slots_refs.unwrap();
+            assert_eq!(slot_list.len(), 1);
+            assert_eq!(ref_count, 1);
+
+            let (indexed_slot, acct_info) = slot_list.first().unwrap();
+            assert_eq!(*indexed_slot, slot);
+            assert!(acct_info.is_zero_lamport());
+            accounts_db.zero_lamport_single_ref_found(*indexed_slot, acct_info.offset());
+            AccountsIndexScanResult::KeepInMemory
+        },
+        None,
+        ScanFilter::All,
+    );
+
+    assert_eq!(
+        storage.num_zero_lamport_single_ref_accounts(),
+        dead_pubkeys.len(),
+    );
+
+    let alive_bytes_before_shrink = storage.alive_bytes();
+    let expected_alive_bytes_after_shrink = accounts_db.alive_bytes_after_shrink(&storage);
+    assert_ne!(expected_alive_bytes_after_shrink, 0);
+    assert!(expected_alive_bytes_after_shrink < alive_bytes_before_shrink);
+    assert_eq!(
+        expected_alive_bytes_after_shrink,
+        AppendVec::calculate_stored_size(alive_account.data().len()),
+    );
+
+    accounts_db.shrink_slot_forced(slot);
+
+    let storage_after_shrink = accounts_db.get_storage_for_slot(slot).unwrap();
+    assert_eq!(
+        storage_after_shrink.alive_bytes(),
+        expected_alive_bytes_after_shrink,
+    );
+    assert_eq!(storage_after_shrink.count(), 1);
+    assert!(accounts_db.contains(&alive_pubkey));
+    for pubkey in &dead_pubkeys {
+        assert!(!accounts_db.contains(pubkey));
     }
 }
 
@@ -1649,7 +1795,7 @@ fn test_cleanup_key_not_removed() {
     db.print_accounts_stats("post");
     let ancestors = Ancestors::from(vec![2]);
     assert_eq!(
-        db.load_without_fixed_root(&ancestors, &key1)
+        db.do_load_for_tests(&ancestors, &key1)
             .unwrap()
             .0
             .lamports(),
@@ -1669,7 +1815,7 @@ fn test_store_large_account() {
     db.store_for_tests((0, [(&key, &account)].as_slice()));
 
     let ancestors = Ancestors::from(vec![0]);
-    let ret = db.load_without_fixed_root(&ancestors, &key).unwrap();
+    let ret = db.do_load_for_tests(&ancestors, &key).unwrap();
     assert_eq!(ret.0.data().len(), data_len);
 }
 
@@ -2369,6 +2515,100 @@ fn test_select_candidates_by_total_usage_all_clean() {
     assert_eq!(0, next_candidates.len());
 }
 
+/// Ensure selecting shrink candidates respects zero-lamport single-ref accounts.
+#[test]
+fn test_select_candidates_by_total_usage_with_zero_lamport_single_ref_accounts() {
+    let accounts_db = AccountsDb::new_single_for_tests();
+    let mut shrink_candidates = ShrinkCandidates::default();
+
+    let num_zero_lamport_single_ref_accounts = 4;
+    let file_size = AppendVec::calculate_stored_size(0) * num_zero_lamport_single_ref_accounts;
+
+    let slot_with_zlsr = 11;
+    let store_with_zlsr = create_store_for_shrink_tests(
+        &accounts_db,
+        slot_with_zlsr,
+        file_size as u64,
+        file_size,
+        num_zero_lamport_single_ref_accounts,
+    );
+    shrink_candidates.insert(slot_with_zlsr);
+
+    let slot_no_zlsr = 22;
+    let store_no_zlsr = create_store_for_shrink_tests(
+        &accounts_db,
+        slot_no_zlsr,
+        file_size as u64,
+        file_size * 9 / 10,
+        0,
+    );
+    shrink_candidates.insert(slot_no_zlsr);
+
+    // test case: The latest full snapshot slot is *older* than
+    // the store with zero lamport single ref accounts.
+    // Ensure shrink will see ZLSR accounts as *alive*.
+    {
+        accounts_db.set_latest_full_snapshot_slot(slot_with_zlsr - 1);
+
+        // Bytes from ZLSR accounts are alive, and will stay alive after shrink.
+        assert_eq!(
+            accounts_db.alive_bytes_after_shrink(&store_with_zlsr),
+            store_with_zlsr.alive_bytes(),
+        );
+        assert!(!accounts_db.is_candidate_for_shrink(&store_with_zlsr));
+        assert!(!accounts_db.is_shrinking_productive(&store_with_zlsr));
+
+        // Stores without ZLSR accounts use the raw alive bytes.
+        assert_eq!(
+            accounts_db.alive_bytes_after_shrink(&store_no_zlsr),
+            store_no_zlsr.alive_bytes(),
+        );
+
+        let (selected_candidates, next_candidates) = accounts_db
+            .select_candidates_by_total_usage(&shrink_candidates, DEFAULT_ACCOUNTS_SHRINK_RATIO);
+
+        // both slots are above the shrink ratio, so neither should be shrink candidates
+        assert!(selected_candidates.is_empty());
+        assert!(next_candidates.is_empty());
+    }
+
+    // test case: The latest full snapshot slot is either:
+    // * newer than the store with ZLSR accounts
+    // * the same as the store with ZLSR accounts
+    // * unset
+    // Ensure shrink will see ZLSR accounts as *dead*.
+    {
+        for latest_full_snapshot_slot in [Some(slot_with_zlsr + 1), Some(slot_with_zlsr), None] {
+            *accounts_db.latest_full_snapshot_slot.lock_write() = latest_full_snapshot_slot;
+
+            // Bytes from ZLSR accounts are alive, but would be dead after shrink.
+            assert_eq!(store_with_zlsr.alive_bytes(), file_size);
+            assert_eq!(accounts_db.alive_bytes_after_shrink(&store_with_zlsr), 0);
+            assert!(accounts_db.is_candidate_for_shrink(&store_with_zlsr));
+            assert!(accounts_db.is_shrinking_productive(&store_with_zlsr));
+
+            // Stores without ZLSR accounts use the raw alive bytes.
+            assert_eq!(
+                accounts_db.alive_bytes_after_shrink(&store_no_zlsr),
+                store_no_zlsr.alive_bytes(),
+            );
+
+            let (selected_candidates, next_candidates) = accounts_db
+                .select_candidates_by_total_usage(
+                    &shrink_candidates,
+                    DEFAULT_ACCOUNTS_SHRINK_RATIO,
+                );
+
+            // slot 11 with the ZLSR accounts *is* selected for shrink
+            assert_eq!(1, selected_candidates.len());
+            assert!(selected_candidates.contains_key(&slot_with_zlsr));
+
+            // slot 22 is above the shrink ratio, so ensure it is not a candidate
+            assert!(next_candidates.is_empty());
+        }
+    }
+}
+
 #[test]
 fn test_delete_dependencies() {
     agave_logger::setup();
@@ -2386,8 +2626,6 @@ fn test_delete_dependencies() {
         0,
         0,
         &key0,
-        &AccountSharedData::default(),
-        &AccountSecondaryIndexes::default(),
         info0,
         &mut reclaims,
         UpsertReclaim::IgnoreReclaims,
@@ -2396,8 +2634,6 @@ fn test_delete_dependencies() {
         1,
         1,
         &key0,
-        &AccountSharedData::default(),
-        &AccountSecondaryIndexes::default(),
         info1,
         &mut reclaims,
         UpsertReclaim::IgnoreReclaims,
@@ -2406,8 +2642,6 @@ fn test_delete_dependencies() {
         1,
         1,
         &key1,
-        &AccountSharedData::default(),
-        &AccountSecondaryIndexes::default(),
         info1,
         &mut reclaims,
         UpsertReclaim::IgnoreReclaims,
@@ -2416,8 +2650,6 @@ fn test_delete_dependencies() {
         2,
         2,
         &key1,
-        &AccountSharedData::default(),
-        &AccountSecondaryIndexes::default(),
         info2,
         &mut reclaims,
         UpsertReclaim::IgnoreReclaims,
@@ -2426,8 +2658,6 @@ fn test_delete_dependencies() {
         2,
         2,
         &key2,
-        &AccountSharedData::default(),
-        &AccountSecondaryIndexes::default(),
         info2,
         &mut reclaims,
         UpsertReclaim::IgnoreReclaims,
@@ -2436,8 +2666,6 @@ fn test_delete_dependencies() {
         3,
         3,
         &key2,
-        &AccountSharedData::default(),
-        &AccountSecondaryIndexes::default(),
         info3,
         &mut reclaims,
         UpsertReclaim::IgnoreReclaims,
@@ -2599,7 +2827,7 @@ fn test_wrapping_storage_id() {
     assert_eq!(slots - 1, db.next_id.load(Ordering::Acquire));
     let ancestors = Ancestors::default();
     keys.iter().for_each(|key| {
-        assert!(db.load_without_fixed_root(&ancestors, key).is_some());
+        assert!(db.do_load_for_tests(&ancestors, key).is_some());
     });
 }
 
@@ -2625,7 +2853,7 @@ fn test_reuse_storage_id() {
     });
     let ancestors = Ancestors::default();
     keys.iter().for_each(|key| {
-        assert!(db.load_without_fixed_root(&ancestors, key).is_some());
+        assert!(db.do_load_for_tests(&ancestors, key).is_some());
     });
 }
 
@@ -2646,7 +2874,7 @@ fn test_zero_lamport_new_root_not_cleaned() {
 
     // Should still be able to find zero lamport account in slot 1
     assert_eq!(
-        db.load_without_fixed_root(&Ancestors::default(), &account_key),
+        db.do_load_for_tests(&Ancestors::default(), &account_key),
         Some((zero_lamport_account, 1))
     );
 }
@@ -2660,26 +2888,23 @@ fn test_store_load_cached() {
     db.store_for_tests((slot, &[(&key, &account0)][..]));
 
     // Load with no ancestors and no root will return nothing
-    assert!(
-        db.load_without_fixed_root(&Ancestors::default(), &key)
-            .is_none()
-    );
+    assert!(db.do_load_for_tests(&Ancestors::default(), &key).is_none());
 
     // Load with ancestors not equal to `slot` will return nothing
     let ancestors = Ancestors::from(vec![slot + 1]);
-    assert!(db.load_without_fixed_root(&ancestors, &key).is_none());
+    assert!(db.do_load_for_tests(&ancestors, &key).is_none());
 
     // Load with ancestors equal to `slot` will return the account
     let ancestors = Ancestors::from(vec![slot]);
     assert_eq!(
-        db.load_without_fixed_root(&ancestors, &key),
+        db.do_load_for_tests(&ancestors, &key),
         Some((account0.clone(), slot))
     );
 
     // Adding root will return the account even without ancestors
     db.add_root(slot);
     assert_eq!(
-        db.load_without_fixed_root(&Ancestors::default(), &key),
+        db.do_load_for_tests(&Ancestors::default(), &key),
         Some((account0, slot))
     );
 }
@@ -2698,7 +2923,7 @@ fn test_store_flush_load_cached() {
     db.flush_accounts_cache(true, None);
     let ancestors = Ancestors::from(vec![slot]);
     assert_eq!(
-        db.load_without_fixed_root(&ancestors, &key),
+        db.do_load_for_tests(&ancestors, &key),
         Some((account0.clone(), slot))
     );
 
@@ -2706,7 +2931,7 @@ fn test_store_flush_load_cached() {
     db.add_root(slot);
     db.flush_accounts_cache(true, None);
     assert_eq!(
-        db.load_without_fixed_root(&Ancestors::default(), &key),
+        db.do_load_for_tests(&Ancestors::default(), &key),
         Some((account0, slot))
     );
 }
@@ -2734,25 +2959,22 @@ fn test_flush_accounts_cache() {
     // Unrooted slot should be able to be fetched before the flush
     let ancestors = Ancestors::from(vec![unrooted_slot]);
     assert_eq!(
-        db.load_without_fixed_root(&ancestors, &unrooted_key),
+        db.do_load_for_tests(&ancestors, &unrooted_key),
         Some((account0.clone(), unrooted_slot))
     );
     db.flush_accounts_cache(true, None);
 
     // After the flush, the unrooted slot is still in the cache
-    assert!(
-        db.load_without_fixed_root(&ancestors, &unrooted_key)
-            .is_some()
-    );
+    assert!(db.do_load_for_tests(&ancestors, &unrooted_key).is_some());
     assert!(db.contains(&unrooted_key));
     assert_eq!(db.accounts_cache.num_slots(), 1);
     assert!(db.accounts_cache.slot_cache(unrooted_slot).is_some());
     assert_eq!(
-        db.load_without_fixed_root(&Ancestors::default(), &key5),
+        db.do_load_for_tests(&Ancestors::default(), &key5),
         Some((account0.clone(), root5))
     );
     assert_eq!(
-        db.load_without_fixed_root(&Ancestors::default(), &key6),
+        db.do_load_for_tests(&Ancestors::default(), &key6),
         Some((account0, root6))
     );
 }
@@ -2827,7 +3049,7 @@ fn run_test_flush_accounts_cache_if_needed(num_roots: usize, num_unrooted: usize
             Ancestors::from(vec![slot])
         };
         assert_eq!(
-            db.load_without_fixed_root(&ancestors, &key),
+            db.do_load_for_tests(&ancestors, &key),
             Some((account0.clone(), slot))
         );
     }
@@ -3461,11 +3683,7 @@ fn test_accounts_db_cache_clean_dead_slots() {
     // an older ancestor set
     let ancestors = Ancestors::from(vec![last_dead_slot]);
     for key in &keys {
-        assert!(
-            accounts_db
-                .load_without_fixed_root(&ancestors, key)
-                .is_some()
-        );
+        assert!(accounts_db.do_load_for_tests(&ancestors, key).is_some());
     }
 
     // If no `max_clean_root` is specified, cleaning should purge all flushed slots
@@ -3481,11 +3699,7 @@ fn test_accounts_db_cache_clean_dead_slots() {
 
     // Dead slots have been purged, so these keys should not be findable in the database.
     for key in &keys {
-        assert!(
-            accounts_db
-                .load_without_fixed_root(&ancestors, key)
-                .is_none()
-        );
+        assert!(accounts_db.do_load_for_tests(&ancestors, key).is_none());
     }
     // Each slot should only have one entry in the storage, since all other accounts were
     // cleaned due to later updates
@@ -4293,6 +4507,7 @@ fn test_remove_uncleaned_slots_and_collect_pubkeys_up_to_slot() {
 #[test]
 fn test_shrink_productive() {
     agave_logger::setup();
+    let accounts = AccountsDb::new_single_for_tests();
     let path = Path::new("");
     let file_size = 100;
     let slot = 11;
@@ -4305,7 +4520,7 @@ fn test_shrink_productive() {
         AccountsFileProvider::AppendVec,
     ));
     store.add_account(file_size as usize);
-    assert!(!AccountsDb::is_shrinking_productive(&store));
+    assert!(!accounts.is_shrinking_productive(&store));
 
     let store = Arc::new(AccountStorageEntry::new(
         path,
@@ -4317,10 +4532,10 @@ fn test_shrink_productive() {
     store.add_account(file_size as usize / 2);
     store.add_account(file_size as usize / 4);
     store.remove_accounts(file_size as usize / 4, 1);
-    assert!(AccountsDb::is_shrinking_productive(&store));
+    assert!(accounts.is_shrinking_productive(&store));
 
     store.add_account(file_size as usize / 2);
-    assert!(!AccountsDb::is_shrinking_productive(&store));
+    assert!(!accounts.is_shrinking_productive(&store));
 }
 
 #[test]
@@ -4848,8 +5063,6 @@ fn test_unref_pubkeys_removed_from_accounts_index() {
             slot1,
             slot1,
             &pk1,
-            &AccountSharedData::default(),
-            &AccountSecondaryIndexes::default(),
             AccountInfo::default(),
             &mut reclaims,
             UpsertReclaim::IgnoreReclaims,
@@ -4900,8 +5113,6 @@ fn test_unref_accounts() {
             slot1,
             slot1,
             &pk1,
-            &AccountSharedData::default(),
-            &AccountSecondaryIndexes::default(),
             AccountInfo::default(),
             &mut reclaims,
             UpsertReclaim::IgnoreReclaims,
@@ -4931,8 +5142,6 @@ fn test_unref_accounts() {
                     slot,
                     slot,
                     &pk,
-                    &AccountSharedData::default(),
-                    &AccountSecondaryIndexes::default(),
                     AccountInfo::default(),
                     &mut reclaims,
                     UpsertReclaim::IgnoreReclaims,
@@ -4972,8 +5181,6 @@ define_accounts_db_test!(test_many_unrefs, |db| {
                 slot,
                 slot,
                 &pk1,
-                &AccountSharedData::default(),
-                &AccountSecondaryIndexes::default(),
                 AccountInfo::default(),
                 &mut reclaims,
                 UpsertReclaim::IgnoreReclaims,
@@ -5685,8 +5892,6 @@ fn populate_index(db: &AccountsDb, slots: Range<Slot>) {
                         slot,
                         slot,
                         account.pubkey(),
-                        &account,
-                        &AccountSecondaryIndexes::default(),
                         info,
                         &mut ReclaimsSlotList::new(),
                         UpsertReclaim::IgnoreReclaims,
@@ -6285,7 +6490,7 @@ fn test_write_accounts_to_cache_scenarios(
     );
 
     // Verify results
-    let loaded = db.load_without_fixed_root(&ancestors, &key);
+    let loaded = db.do_load_for_tests(&ancestors, &key);
     match expected_lamports {
         Some(expected) => {
             assert!(loaded.is_some(), "Account should be loadable");
@@ -6454,7 +6659,7 @@ fn test_load_does_not_return_data_from_non_ancestor_root() {
     // Ancestors = {17, 19}: min_slot = 17. Slot 18 is rooted but not an
     // ancestor, so it must be excluded. Slot 16 <= 17, so it is returned.
     let ancestors = Ancestors::from(vec![17, 19]);
-    let (account, slot) = db.load_without_fixed_root(&ancestors, &pubkey).unwrap();
+    let (account, slot) = db.do_load_for_tests(&ancestors, &pubkey).unwrap();
 
     assert_eq!(
         slot, 16,

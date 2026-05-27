@@ -53,7 +53,7 @@ use {
         consensus_pool_service::{ConsensusPoolContext, ConsensusPoolService},
         consensus_rewards::ConsensusRewardsService,
         event::{
-            LeaderWindowInfo, RepairEventSender, SwitchBankEventSender, VotorEventReceiver,
+            LatestSwitchRequest, LeaderWindowInfo, RepairEventSender, VotorEventReceiver,
             VotorEventSender,
         },
         event_handler::{EventHandler, EventHandlerContext},
@@ -121,7 +121,7 @@ pub struct VotorConfig {
     pub own_vote_sender: Sender<Vec<ConsensusMessage>>,
     pub reward_certs_sender: Sender<BuildRewardCertsResponse>,
     pub repair_event_sender: RepairEventSender,
-    pub switch_bank_sender: SwitchBankEventSender,
+    pub latest_switch_request: LatestSwitchRequest,
 
     // Receivers
     pub event_receiver: VotorEventReceiver,
@@ -140,7 +140,7 @@ pub(crate) struct SharedContext {
     pub(crate) highest_parent_ready: Arc<RwLock<(Slot, (Slot, Hash))>>,
     pub(crate) vote_history_storage: Arc<dyn VoteHistoryStorage>,
     pub(crate) repair_event_sender: RepairEventSender,
-    pub(crate) switch_bank_sender: SwitchBankEventSender,
+    pub(crate) latest_switch_request: LatestSwitchRequest,
 }
 
 pub struct Votor {
@@ -172,7 +172,7 @@ impl Votor {
             event_sender,
             own_vote_sender,
             repair_event_sender,
-            switch_bank_sender,
+            latest_switch_request,
             event_receiver,
             consensus_message_receiver,
             consensus_metrics_sender,
@@ -200,7 +200,7 @@ impl Votor {
             leader_window_info_sender,
             vote_history_storage,
             repair_event_sender: repair_event_sender.clone(),
-            switch_bank_sender,
+            latest_switch_request,
         };
 
         let voting_context = VotingContext {

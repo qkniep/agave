@@ -75,15 +75,33 @@ use {
     solana_account::Account,
     solana_program_runtime::sysvar_cache::SysvarCache,
     solana_sdk_ids::sysvar::rent,
-    solana_svm_test_harness_instr::{
-        self as harness, fixture::instr_context::InstrContext,
-        keyed_account::keyed_account_for_system_program,
+    solana_svm::conformance::{
+        context::InstrContext,
+        harness::execute_instr,
+        programs::{
+            add_program_to_program_cache, keyed_account_for_system_program,
+            new_program_cache_with_builtins,
+        },
     },
+    std::{fs::File, io::Read, path::PathBuf},
 };
+
+#[cfg(any(feature = "sbf_c", feature = "sbf_rust"))]
+fn load_program_elf(program_name: &str) -> Vec<u8> {
+    let sbf_out_dir =
+        std::env::var("SBF_OUT_DIR").expect("SBF_OUT_DIR must be set to locate program ELFs");
+    let path = PathBuf::from(sbf_out_dir).join(format!("{program_name}.so"));
+    let mut file = File::open(&path)
+        .unwrap_or_else(|e| panic!("Failed to open file {}: {}", path.display(), e));
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)
+        .unwrap_or_else(|e| panic!("Failed to read file {}: {}", path.display(), e));
+    data
+}
 
 #[cfg(feature = "sbf_rust")]
 fn default_program_cache() -> solana_program_runtime::loaded_programs::ProgramCacheForTxBatch {
-    harness::program_cache::new_with_builtins(/* slot */ 0)
+    new_program_cache_with_builtins(/* slot */ 0)
 }
 
 fn default_program_cache_with_program(
@@ -93,7 +111,7 @@ fn default_program_cache_with_program(
     compute_budget: &ComputeBudget,
 ) -> solana_program_runtime::loaded_programs::ProgramCacheForTxBatch {
     let mut program_cache = default_program_cache();
-    harness::program_cache::add_program(
+    add_program_to_program_cache(
         &mut program_cache,
         program_id,
         &bpf_loader_upgradeable::id(),
@@ -274,7 +292,7 @@ fn test_program_sbf_sanity() {
     for program in programs.iter() {
         println!("Test program: {:?}", program.0);
 
-        let program_elf = harness::file::load_program_elf(program.0);
+        let program_elf = load_program_elf(program.0);
         let program_id = Pubkey::new_unique();
 
         let feature_set = SVMFeatureSet::all_enabled();
@@ -305,9 +323,7 @@ fn test_program_sbf_sanity() {
             instruction,
         };
 
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
         let result = match effects.result {
             Some(err) => Err(err),
@@ -340,7 +356,7 @@ fn test_program_sbf_loader_deprecated() {
     for program in programs.iter() {
         println!("Test program: {:?}", program);
 
-        let program_elf = harness::file::load_program_elf(program);
+        let program_elf = load_program_elf(program);
         let program_id = Pubkey::new_unique();
 
         let feature_set = SVMFeatureSet::all_enabled();
@@ -354,7 +370,7 @@ fn test_program_sbf_loader_deprecated() {
         ];
 
         let mut program_cache = default_program_cache();
-        harness::program_cache::add_program(
+        add_program_to_program_cache(
             &mut program_cache,
             &program_id,
             &bpf_loader_deprecated::id(),
@@ -373,9 +389,7 @@ fn test_program_sbf_loader_deprecated() {
             instruction,
         };
 
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
         assert!(effects.result.is_none());
     }
@@ -396,7 +410,7 @@ fn test_sol_alloc_free_no_longer_deployable_with_upgradeable_loader() {
     // In fact, `sol_alloc_free_` is called from sbf allocator, which is originated from
     // AccountInfo::realloc() in the program code.
 
-    let program_elf = harness::file::load_program_elf("solana_sbf_rust_deprecated_loader");
+    let program_elf = load_program_elf("solana_sbf_rust_deprecated_loader");
     let program_id = Pubkey::new_unique();
     let authority_pubkey = Pubkey::new_unique();
     let buffer_pubkey = Pubkey::new_unique();
@@ -496,9 +510,7 @@ fn test_sol_alloc_free_no_longer_deployable_with_upgradeable_loader() {
     // in elf inside syscall table. In this case, `sol_alloc_free_` can't be
     // found in syscall table. Hence, the verification fails and the deployment
     // fails.
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
     assert_eq!(effects.result, Some(InstructionError::InvalidAccountData));
 }
@@ -521,7 +533,7 @@ fn test_program_sbf_duplicate_accounts() {
     for program in programs.iter() {
         println!("Test program: {:?}", program);
 
-        let program_elf = harness::file::load_program_elf(program);
+        let program_elf = load_program_elf(program);
         let program_id = Pubkey::new_unique();
         let feature_set = SVMFeatureSet::all_enabled();
         let compute_budget = ComputeBudget::new_with_defaults(false);
@@ -557,8 +569,7 @@ fn test_program_sbf_duplicate_accounts() {
                 accounts,
                 instruction,
             };
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap()
+            execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache)
         };
 
         let effects = execute(&[1]);
@@ -610,9 +621,7 @@ fn test_program_sbf_duplicate_accounts() {
             accounts,
             instruction,
         };
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
         assert!(effects.result.is_none());
     }
 }
@@ -635,7 +644,7 @@ fn test_program_sbf_error_handling() {
     for program in programs.iter() {
         println!("Test program: {:?}", program);
 
-        let program_elf = harness::file::load_program_elf(program);
+        let program_elf = load_program_elf(program);
         let program_id = Pubkey::new_unique();
 
         let feature_set = SVMFeatureSet::all_enabled();
@@ -664,8 +673,7 @@ fn test_program_sbf_error_handling() {
                 instruction,
             };
 
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap()
+            execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache)
         };
 
         let effects = execute(&[1]);
@@ -730,7 +738,7 @@ fn test_return_data_and_log_data_syscall() {
     for program in programs.iter() {
         println!("Test program: {:?}", program);
 
-        let program_elf = harness::file::load_program_elf(program);
+        let program_elf = load_program_elf(program);
         let program_id = Pubkey::new_unique();
 
         let feature_set = SVMFeatureSet::all_enabled();
@@ -757,9 +765,7 @@ fn test_return_data_and_log_data_syscall() {
             instruction,
         };
 
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
         assert!(effects.result.is_none());
 
@@ -1406,8 +1412,8 @@ fn test_program_sbf_invoke_sanity() {
 #[test]
 #[cfg(feature = "sbf_rust")]
 fn test_program_sbf_program_id_spoofing() {
-    let spoof1_elf = harness::file::load_program_elf("solana_sbf_rust_spoof1");
-    let spoof1_system_elf = harness::file::load_program_elf("solana_sbf_rust_spoof1_system");
+    let spoof1_elf = load_program_elf("solana_sbf_rust_spoof1");
+    let spoof1_system_elf = load_program_elf("solana_sbf_rust_spoof1_system");
 
     let malicious_swap_pubkey = Pubkey::new_unique();
     let malicious_system_pubkey = Pubkey::new_unique();
@@ -1428,8 +1434,8 @@ fn test_program_sbf_program_id_spoofing() {
         (to_pubkey, Account::new(0, 0, &system_program::id())),
     ];
 
-    let mut program_cache = harness::program_cache::new_with_builtins(0);
-    harness::program_cache::add_program(
+    let mut program_cache = new_program_cache_with_builtins(0);
+    add_program_to_program_cache(
         &mut program_cache,
         &malicious_swap_pubkey,
         &bpf_loader_upgradeable::id(),
@@ -1437,7 +1443,7 @@ fn test_program_sbf_program_id_spoofing() {
         &feature_set,
         &compute_budget,
     );
-    harness::program_cache::add_program(
+    add_program_to_program_cache(
         &mut program_cache,
         &malicious_system_pubkey,
         &bpf_loader_upgradeable::id(),
@@ -1463,9 +1469,7 @@ fn test_program_sbf_program_id_spoofing() {
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
     assert_eq!(
         effects.result,
@@ -1482,7 +1486,7 @@ fn test_program_sbf_program_id_spoofing() {
 #[test]
 #[cfg(feature = "sbf_rust")]
 fn test_program_sbf_caller_has_access_to_cpi_program() {
-    let caller_access_elf = harness::file::load_program_elf("solana_sbf_rust_caller_access");
+    let caller_access_elf = load_program_elf("solana_sbf_rust_caller_access");
 
     let caller_pubkey = Pubkey::new_unique();
     let caller2_pubkey = Pubkey::new_unique();
@@ -1501,8 +1505,8 @@ fn test_program_sbf_caller_has_access_to_cpi_program() {
         ),
     ];
 
-    let mut program_cache = harness::program_cache::new_with_builtins(0);
-    harness::program_cache::add_program(
+    let mut program_cache = new_program_cache_with_builtins(0);
+    add_program_to_program_cache(
         &mut program_cache,
         &caller_pubkey,
         &bpf_loader_upgradeable::id(),
@@ -1510,7 +1514,7 @@ fn test_program_sbf_caller_has_access_to_cpi_program() {
         &feature_set,
         &compute_budget,
     );
-    harness::program_cache::add_program(
+    add_program_to_program_cache(
         &mut program_cache,
         &caller2_pubkey,
         &bpf_loader_upgradeable::id(),
@@ -1532,9 +1536,7 @@ fn test_program_sbf_caller_has_access_to_cpi_program() {
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
     assert_eq!(effects.result, Some(InstructionError::MissingAccount));
 }
@@ -1544,7 +1546,7 @@ fn test_program_sbf_caller_has_access_to_cpi_program() {
 fn test_program_sbf_ro_modify() {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("solana_sbf_rust_ro_modify");
+    let program_elf = load_program_elf("solana_sbf_rust_ro_modify");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
@@ -1579,9 +1581,7 @@ fn test_program_sbf_ro_modify() {
             instruction,
         };
 
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
         assert_eq!(
             effects.result,
@@ -1595,7 +1595,7 @@ fn test_program_sbf_ro_modify() {
 fn test_program_sbf_call_depth() {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("solana_sbf_rust_call_depth");
+    let program_elf = load_program_elf("solana_sbf_rust_call_depth");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
@@ -1618,7 +1618,7 @@ fn test_program_sbf_call_depth() {
             instruction,
         };
 
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache).unwrap()
+        execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache)
     };
 
     let effects = execute(compute_budget.max_call_depth - 1);
@@ -1633,7 +1633,7 @@ fn test_program_sbf_call_depth() {
 fn test_program_sbf_compute_budget() {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("solana_sbf_rust_noop");
+    let program_elf = load_program_elf("solana_sbf_rust_noop");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
@@ -1661,9 +1661,7 @@ fn test_program_sbf_compute_budget() {
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
     assert_eq!(
         effects.result,
@@ -1720,7 +1718,7 @@ fn assert_instruction_count() {
 
     println!("\n  {:36} expected actual  diff", "SBF program");
     for (program_name, expected_consumption) in programs.iter() {
-        let program_elf = harness::file::load_program_elf(program_name);
+        let program_elf = load_program_elf(program_name);
         let program_id = Pubkey::new_unique();
 
         let mut program_cache = default_program_cache_with_program(
@@ -1746,9 +1744,7 @@ fn assert_instruction_count() {
             instruction,
         };
 
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
         let consumption = compute_budget
             .compute_unit_limit
@@ -1834,8 +1830,7 @@ fn test_program_sbf_instruction_introspection() {
 fn test_program_sbf_r2_instruction_data_pointer(num_accounts: usize, input_data_len: usize) {
     agave_logger::setup();
 
-    let program_elf =
-        harness::file::load_program_elf("solana_sbf_rust_r2_instruction_data_pointer");
+    let program_elf = load_program_elf("solana_sbf_rust_r2_instruction_data_pointer");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
@@ -1877,9 +1872,7 @@ fn test_program_sbf_r2_instruction_data_pointer(num_accounts: usize, input_data_
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
     assert!(effects.result.is_none());
     assert_eq!(input_data, effects.return_data);
@@ -2375,7 +2368,7 @@ fn test_program_sbf_disguised_as_sbf_loader() {
     }
 
     for program in programs.iter() {
-        let program_elf = harness::file::load_program_elf(program);
+        let program_elf = load_program_elf(program);
         let program_id = Pubkey::new_unique();
 
         let feature_set = SVMFeatureSet {
@@ -2385,7 +2378,7 @@ fn test_program_sbf_disguised_as_sbf_loader() {
         let compute_budget = ComputeBudget::new_with_defaults(false);
 
         let mut program_cache = default_program_cache();
-        harness::program_cache::add_program(
+        add_program_to_program_cache(
             &mut program_cache,
             &program_id,
             &bpf_loader::id(),
@@ -2404,9 +2397,7 @@ fn test_program_sbf_disguised_as_sbf_loader() {
             instruction,
         };
 
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
         assert_eq!(effects.result, Some(InstructionError::UnsupportedProgramId));
     }
 }
@@ -2416,14 +2407,14 @@ fn test_program_sbf_disguised_as_sbf_loader() {
 fn test_program_reads_from_program_account() {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("read_program");
+    let program_elf = load_program_elf("read_program");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
     let compute_budget = ComputeBudget::new_with_defaults(false);
 
-    let mut program_cache = harness::program_cache::new_with_builtins(0);
-    harness::program_cache::add_program(
+    let mut program_cache = new_program_cache_with_builtins(0);
+    add_program_to_program_cache(
         &mut program_cache,
         &program_id,
         &bpf_loader::id(),
@@ -2452,9 +2443,7 @@ fn test_program_reads_from_program_account() {
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
     assert!(effects.result.is_none());
 }
 
@@ -2463,13 +2452,13 @@ fn test_program_reads_from_program_account() {
 fn test_program_sbf_c_dup() {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("ser");
+    let program_elf = load_program_elf("ser");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
     let compute_budget = ComputeBudget::new_with_defaults(false);
-    let mut program_cache = harness::program_cache::new_with_builtins(0);
-    harness::program_cache::add_program(
+    let mut program_cache = new_program_cache_with_builtins(0);
+    add_program_to_program_cache(
         &mut program_cache,
         &program_id,
         &bpf_loader_upgradeable::id(),
@@ -2496,9 +2485,7 @@ fn test_program_sbf_c_dup() {
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
     assert!(effects.result.is_none());
 }
 
@@ -2673,7 +2660,7 @@ fn test_program_sbf_upgrade_via_cpi() {
 fn test_program_sbf_ro_account_modify() {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("solana_sbf_rust_ro_account_modify");
+    let program_elf = load_program_elf("solana_sbf_rust_ro_account_modify");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
@@ -2704,9 +2691,7 @@ fn test_program_sbf_ro_account_modify() {
             instruction,
         };
 
-        let effects =
-            harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-                .unwrap();
+        let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
         assert_eq!(effects.result, Some(InstructionError::ReadonlyDataModified));
     }
@@ -3039,7 +3024,7 @@ fn test_program_sbf_realloc() {
                 )
                 .unwrap_err()
                 .unwrap(),
-            TransactionError::InstructionError(0, InstructionError::AccountDataSizeChanged)
+            TransactionError::InstructionError(0, InstructionError::ExternalAccountDataModified)
         );
 
         // realloc and assign to self via cpi
@@ -3066,7 +3051,7 @@ fn test_program_sbf_realloc() {
                 )
                 .unwrap_err()
                 .unwrap(),
-            TransactionError::InstructionError(0, InstructionError::AccountDataSizeChanged)
+            TransactionError::InstructionError(0, InstructionError::ExternalAccountDataModified)
         );
 
         // Assign to self and realloc via cpi
@@ -3344,7 +3329,7 @@ fn test_program_sbf_realloc_invoke() {
             )
             .unwrap_err()
             .unwrap(),
-        TransactionError::InstructionError(0, InstructionError::AccountDataSizeChanged)
+        TransactionError::InstructionError(0, InstructionError::ExternalAccountDataModified)
     );
 
     // realloc and assign to self via system program
@@ -3375,7 +3360,7 @@ fn test_program_sbf_realloc_invoke() {
             )
             .unwrap_err()
             .unwrap(),
-        TransactionError::InstructionError(0, InstructionError::AccountDataSizeChanged)
+        TransactionError::InstructionError(0, InstructionError::ExternalAccountDataModified)
     );
 
     // Assign to self and realloc via system program
@@ -4328,7 +4313,7 @@ fn test_cpi_account_data_updates() {
                     if virtual_address_space_adjustments {
                         InstructionError::InvalidRealloc
                     } else {
-                        InstructionError::AccountDataSizeChanged
+                        InstructionError::ExternalAccountDataModified
                     }
                 )
             );
@@ -4371,7 +4356,7 @@ fn test_cpi_account_data_updates() {
                     if virtual_address_space_adjustments && deprecated_callee {
                         InstructionError::InvalidRealloc
                     } else {
-                        InstructionError::AccountDataSizeChanged
+                        InstructionError::ExternalAccountDataModified
                     }
                 )
             );
@@ -4595,7 +4580,7 @@ fn test_deplete_cost_meter_with_access_violation() {
 fn test_program_sbf_deplete_cost_meter_with_divide_by_zero() {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("solana_sbf_rust_divide_by_zero");
+    let program_elf = load_program_elf("solana_sbf_rust_divide_by_zero");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
@@ -4621,9 +4606,7 @@ fn test_program_sbf_deplete_cost_meter_with_divide_by_zero() {
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
     assert_eq!(
         effects.result,
@@ -5661,7 +5644,7 @@ fn test_mem_syscalls_overlap_account_begin_or_end() {
 fn test_program_sbf_rust_direct_account_pointers(num_accounts: usize, input_data_len: usize) {
     agave_logger::setup();
 
-    let program_elf = harness::file::load_program_elf("solana_sbf_rust_direct_account_pointers");
+    let program_elf = load_program_elf("solana_sbf_rust_direct_account_pointers");
     let program_id = Pubkey::new_unique();
 
     let feature_set = SVMFeatureSet::all_enabled();
@@ -5708,9 +5691,7 @@ fn test_program_sbf_rust_direct_account_pointers(num_accounts: usize, input_data
         instruction,
     };
 
-    let effects =
-        harness::execute_instr(context, &compute_budget, &mut program_cache, &sysvar_cache)
-            .unwrap();
+    let effects = execute_instr(&context, &compute_budget, &mut program_cache, &sysvar_cache);
 
     assert!(effects.result.is_none());
     // `num_accounts * 2` will be added as return data.

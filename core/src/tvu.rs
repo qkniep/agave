@@ -11,10 +11,10 @@ use {
             DuplicateConfirmedSlotsReceiver, GossipVerifiedVoteHashReceiver,
             VerifiedVoterSlotsReceiver, VerifiedVoterSlotsSender, VoteTracker,
         },
-        cluster_slots_service::{ClusterSlotsService, cluster_slots::ClusterSlots},
+        cluster_slots_service::{cluster_slots::ClusterSlots, ClusterSlotsService},
         commitment_service::AggregateCommitmentService,
         completed_data_sets_service::CompletedDataSetsSender,
-        consensus::{Tower, tower_storage::TowerStorage},
+        consensus::{tower_storage::TowerStorage, Tower},
         cost_update_service::CostUpdateService,
         drop_bank_service::DropBankService,
         epoch_specs::EpochSpecs,
@@ -23,7 +23,7 @@ use {
             repair_service::{OutstandingShredRepairs, RepairInfo, RepairServiceChannels},
         },
         replay_stage::{ReplayReceivers, ReplaySenders, ReplayStage, ReplayStageConfig},
-        shred_fetch_stage::{SHRED_FETCH_CHANNEL_SIZE, ShredFetchStage},
+        shred_fetch_stage::{ShredFetchStage, SHRED_FETCH_CHANNEL_SIZE},
         voting_service::VotingService,
         warm_quic_cache_service::WarmQuicCacheService,
         window_service::{WindowService, WindowServiceChannels},
@@ -31,7 +31,7 @@ use {
     agave_votor::{
         common::StandstillSignal,
         consensus_metrics::MAX_IN_FLIGHT_CONSENSUS_EVENTS,
-        event::{LeaderWindowInfo, VotorEventReceiver, VotorEventSender},
+        event::{LatestSwitchRequest, LeaderWindowInfo, VotorEventReceiver, VotorEventSender},
         generated_cert_types::GeneratedCertTypes,
         vote_history::VoteHistory,
         vote_history_storage::VoteHistoryStorage,
@@ -39,7 +39,7 @@ use {
         votor::{Votor, VotorConfig},
     },
     agave_votor_messages::reward_certificate::{BuildRewardCertsRequest, BuildRewardCertsResponse},
-    crossbeam_channel::{Receiver, Sender, bounded, unbounded},
+    crossbeam_channel::{bounded, unbounded, Receiver, Sender},
     solana_client::connection_cache::ConnectionCache,
     solana_clock::Slot,
     solana_geyser_plugin_manager::block_metadata_notifier_interface::BlockMetadataNotifierArc,
@@ -50,7 +50,7 @@ use {
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_ledger::{
-        blockstore::{Blockstore, MAX_COMPLETED_SLOTS_IN_CHANNEL, UpdateParentReceiver},
+        blockstore::{Blockstore, UpdateParentReceiver, MAX_COMPLETED_SLOTS_IN_CHANNEL},
         blockstore_cleanup_service::BlockstoreCleanupService,
         blockstore_processor::TransactionStatusSender,
         entry_notifier_service::EntryNotifierSender,
@@ -76,15 +76,15 @@ use {
     solana_streamer::{
         evicting_sender::EvictingSender,
         nonblocking::simple_qos::SimpleQosConfig,
-        quic::{QuicStreamerConfig, SpawnServerResult, spawn_simple_qos_server},
+        quic::{spawn_simple_qos_server, QuicStreamerConfig, SpawnServerResult},
         streamer::StakedNodes,
     },
-    solana_turbine::{XdpSender, retransmit_stage::RetransmitStage},
+    solana_turbine::{retransmit_stage::RetransmitStage, XdpSender},
     std::{
         collections::HashSet,
         net::UdpSocket,
         num::NonZeroUsize,
-        sync::{Arc, RwLock, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, RwLock},
         thread::{self, JoinHandle},
     },
     tokio_util::sync::CancellationToken,
@@ -433,12 +433,8 @@ impl Tvu {
         // repair (retry timeouts).
         let standstill_signal = Arc::new(StandstillSignal::new());
 
-        // Create switch block event channel for ReplayStage
-        // We emit a switch bank event when we observe a ParentReady.
-        // The event is immediately consumed and the latest is stored in ReplayStage.
-        // We overprovision at 100 leader windows - we would require almost 3 minutes of stuck
-        // replay to hit the limit.
-        let (switch_bank_sender, switch_bank_receiver) = bounded(100);
+        // Shared latest switch-bank request from Votor to ReplayStage.
+        let latest_switch_request = LatestSwitchRequest::default();
 
         let window_service = {
             let epoch_schedule = bank_forks
@@ -528,7 +524,7 @@ impl Tvu {
             leader_window_info_sender,
             highest_parent_ready,
             event_sender: votor_event_sender.clone(),
-            switch_bank_sender,
+            latest_switch_request: latest_switch_request.clone(),
             own_vote_sender: consensus_message_sender.clone(),
             reward_certs_sender,
             repair_event_sender,
@@ -573,7 +569,7 @@ impl Tvu {
             gossip_verified_vote_hash_receiver,
             popular_pruned_forks_receiver,
             bank_forks_controller_receiver,
-            switch_bank_receiver,
+            latest_switch_request,
         };
 
         let replay_stage_config = ReplayStageConfig {
@@ -741,7 +737,7 @@ pub mod tests {
             blockstore::BlockstoreSignals,
             blockstore_options::BlockstoreOptions,
             create_new_tmp_ledger,
-            genesis_utils::{GenesisConfigInfo, create_genesis_config},
+            genesis_utils::{create_genesis_config, GenesisConfigInfo},
         },
         solana_net_utils::SocketAddrSpace,
         solana_poh::poh_recorder::create_test_recorder,

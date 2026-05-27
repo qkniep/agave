@@ -4,7 +4,8 @@ use {
         fraction::Fraction,
         vote::{Vote, VoteType},
     },
-    solana_clock::{DEFAULT_MS_PER_SLOT, NUM_CONSECUTIVE_LEADER_SLOTS, Slot},
+    solana_clock::Slot,
+    solana_leader_schedule::NUM_CONSECUTIVE_LEADER_SLOTS,
     std::{
         sync::atomic::{AtomicU64, Ordering},
         time::Duration,
@@ -85,14 +86,6 @@ const DELTA_BLOCK_PROPAGATION: Duration = DELTA.checked_mul(3).unwrap();
 /// validator triggering the parent ready event and for block propagation delay.
 pub(crate) const DELTA_TIMEOUT: Duration = DELTA.checked_add(DELTA_BLOCK_PROPAGATION).unwrap();
 
-/// Time budget we allow a leader to build and send their first slice after
-/// their leader window starts. `TimeoutCrashedLeader` must therefore fire
-/// no earlier than `DELTA_TIMEOUT + DELTA_FIRST_SLICE` from the start of the
-/// window, otherwise we may declare a correct leader crashed.
-///
-/// Conservatively initialized to the slot time.
-pub(crate) const DELTA_FIRST_SLICE: Duration = Duration::from_millis(DEFAULT_MS_PER_SLOT);
-
 /// Timeout for standstill detection mechanism.
 pub(crate) const DELTA_STANDSTILL: Duration = Duration::from_millis(10_000);
 
@@ -152,7 +145,8 @@ pub fn calculate_timeout_multiplier(slot: Slot, standstill_slot: Option<Slot>) -
         None => 1.0,
         Some(standstill_slot) => {
             let slots_since_standstill = slot.saturating_sub(standstill_slot);
-            let leader_windows = slots_since_standstill / NUM_CONSECUTIVE_LEADER_SLOTS;
+            let leader_windows =
+                slots_since_standstill / NUM_CONSECUTIVE_LEADER_SLOTS.get() as Slot;
             1.05_f64.powi(leader_windows as i32)
         }
     }

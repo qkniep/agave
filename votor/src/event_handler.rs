@@ -3,11 +3,11 @@
 
 use {
     crate::{
-        commitment::{CommitmentType, update_commitment_cache},
-        common::{DELTA_FIRST_SLICE, StandstillSignal},
+        commitment::{update_commitment_cache, CommitmentType},
+        common::StandstillSignal,
         consensus_metrics::ConsensusMetricsEvent,
         event::{
-            CompletedBlock, RepairEvent, RepairEventSender, SwitchBankEvent, SwitchBankEventSender,
+            CompletedBlock, LatestSwitchRequest, RepairEvent, RepairEventSender, SwitchBankEvent,
             VotorEvent, VotorEventReceiver,
         },
         event_handler::stats::EventHandlerStats,
@@ -15,11 +15,11 @@ use {
         timer_manager::TimerManager,
         vote_history::{VoteHistory, VoteHistoryError},
         voting_service::BLSOp,
-        voting_utils::{VoteError, VotingContext, generate_vote_message},
+        voting_utils::{generate_vote_message, VoteError, VotingContext},
         votor::SharedContext,
     },
     agave_votor_messages::{consensus_message::Block, migration::MigrationStatus, vote::Vote},
-    crossbeam_channel::{RecvError, SendError, TrySendError, select},
+    crossbeam_channel::{select, RecvError, SendError, TrySendError},
     parking_lot::RwLock,
     solana_clock::Slot,
     solana_hash::Hash,
@@ -27,7 +27,6 @@ use {
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank,
-        bank_forks_controller::BankForksControllerError,
         leader_schedule_utils::{
             first_of_consecutive_leader_slots, last_of_consecutive_leader_slots, leader_slot_index,
         },
@@ -36,8 +35,8 @@ use {
     std::{
         collections::{BTreeMap, BTreeSet},
         sync::{
-            Arc,
             atomic::{AtomicBool, Ordering},
+            Arc,
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
@@ -79,9 +78,6 @@ enum EventLoopError {
 
     #[error("Set identity error")]
     SetIdentityError(#[from] VoteHistoryError),
-
-    #[error("Bank forks controller error")]
-    BankForksControllerError(#[from] BankForksControllerError),
 }
 
 pub(crate) struct EventHandler {
@@ -176,7 +172,7 @@ impl EventHandler {
                 .saturating_add(receive_event_time.as_us() as u32);
 
             let root_bank = vctx.sharable_banks.root();
-            if event.should_ignore(root_bank.slot()) {
+            if event.should_ignore(root_bank.slot().max(vctx.vote_history.root())) {
                 local_context.stats.ignored = local_context.stats.ignored.saturating_add(1);
                 continue;
             }
@@ -226,15 +222,15 @@ impl EventHandler {
 
         // We need to ensure that we've replayed the parent bank.
         if parent_slot > vctx.sharable_banks.root().slot() {
-            request_switch(&ctx.switch_bank_sender, *my_pubkey, parent_block)?;
+            request_switch(&ctx.latest_switch_request, *my_pubkey, parent_block);
         }
 
         let should_set_timeouts = vctx.vote_history.add_parent_ready(slot, parent_block);
         Self::check_pending_blocks(my_pubkey, &mut local_context.pending_blocks, vctx, votes)?;
         if should_set_timeouts {
-            // TODO: configure delta_first_slice in bank
-            let delta_first_slice = DELTA_FIRST_SLICE;
-            let delta_block = Duration::from_nanos_u128(vctx.sharable_banks.root().ns_per_slot);
+            let root_bank = vctx.sharable_banks.root();
+            let delta_block = Duration::from_nanos_u128(root_bank.ns_per_slot_at_slot(slot));
+            let delta_first_slice = delta_block;
             timer_manager.write().set_timeouts(
                 slot,
                 local_context.standstill_signal.get(),
@@ -314,7 +310,7 @@ impl EventHandler {
                     finalized_blocks,
                     received_shred,
                     stats,
-                )?;
+                );
                 if let Some(parent_block) =
                     Self::add_missing_parent_ready(block, ctx, vctx, local_context)
                 {
@@ -450,7 +446,7 @@ impl EventHandler {
                     finalized_blocks,
                     received_shred,
                     stats,
-                )?;
+                );
 
                 if let Some(slot) = standstill_signal.get() {
                     if block.0 > slot {
@@ -767,10 +763,13 @@ impl EventHandler {
         // In case we set root in the middle of a leader window,
         // it's not necessary to vote skip prior to it and we won't
         // be able to check vote history if we've already voted on it
-        let root_bank = voting_context.sharable_banks.root();
+        let root_slot = voting_context
+            .vote_history
+            .root()
+            .max(voting_context.sharable_banks.root().slot());
         // No matter what happens, we should not vote skip for slot 0
         let start = first_of_consecutive_leader_slots(slot)
-            .max(root_bank.slot())
+            .max(root_slot)
             .max(1);
         for s in start..=last_of_consecutive_leader_slots(slot) {
             if voting_context.vote_history.voted(s) {
@@ -823,9 +822,9 @@ impl EventHandler {
         finalized_blocks: &mut BTreeSet<Block>,
         received_shred: &mut BTreeSet<Slot>,
         stats: &mut EventHandlerStats,
-    ) -> Result<(), BankForksControllerError> {
+    ) {
         let bank_forks_r = ctx.bank_forks.read().unwrap();
-        let old_root = bank_forks_r.root();
+        let old_root = bank_forks_r.root().max(vctx.vote_history.root());
         let Some(new_root) = finalized_blocks
             .iter()
             .filter_map(|&(slot, block_id)| {
@@ -839,7 +838,7 @@ impl EventHandler {
             .max()
         else {
             // No rootable banks
-            return Ok(());
+            return;
         };
         drop(bank_forks_r);
         root_utils::set_root(
@@ -851,9 +850,8 @@ impl EventHandler {
             pending_blocks,
             finalized_blocks,
             received_shred,
-        )?;
+        );
         stats.set_root(new_root);
-        Ok(())
     }
 
     pub(crate) fn join(self) -> thread::Result<()> {
@@ -886,28 +884,14 @@ fn request_repair(
     }
 }
 
-/// Sends a switch bank event to replay.
-fn request_switch(
-    sender: &SwitchBankEventSender,
-    my_pubkey: Pubkey,
-    block: Block,
-) -> Result<(), EventLoopError> {
+/// Updates the latest switch-bank request for replay to consume.
+fn request_switch(latest: &LatestSwitchRequest, my_pubkey: Pubkey, block: Block) {
     let (slot, block_id) = block;
     let event = SwitchBankEvent::Switch { slot, block_id };
-    match sender.try_send(event) {
-        Ok(()) => Ok(()),
-        Err(TrySendError::Full(event)) => {
-            error!(
-                "{my_pubkey}: Switch bank event channel is full, this should not happen. Blocking \
-                 to send event for slot {slot}"
-            );
-            sender
-                .send(event)
-                .map_err(|_| EventLoopError::SenderDisconnected(SendError(())))
-        }
-        Err(TrySendError::Disconnected(_)) => {
-            Err(EventLoopError::SenderDisconnected(SendError(())))
-        }
+    if let Some(prev) = latest.try_advance(event) {
+        trace!(
+            "{my_pubkey}: Overwriting previous switch request {prev:?} with ({slot}, {block_id})"
+        );
     }
 }
 
@@ -918,7 +902,7 @@ mod tests {
         crate::{
             commitment::CommitmentAggregationData,
             consensus_metrics::ConsensusMetricsEventReceiver,
-            event::{LeaderWindowInfo, RepairEventReceiver, SwitchBankEventReceiver},
+            event::{LeaderWindowInfo, RepairEventReceiver},
             vote_history_storage::{
                 FileVoteHistoryStorage, SavedVoteHistory, SavedVoteHistoryVersions,
                 VoteHistoryStorage,
@@ -926,10 +910,10 @@ mod tests {
             voting_service::BLSOp,
         },
         agave_votor_messages::{
-            consensus_message::{BLS_KEYPAIR_DERIVE_SEED, ConsensusMessage, VoteMessage},
+            consensus_message::{ConsensusMessage, VoteMessage, BLS_KEYPAIR_DERIVE_SEED},
             vote::Vote,
         },
-        crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded},
+        crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError},
         parking_lot::RwLock as PlRwLock,
         solana_bls_signatures::{
             keypair::Keypair as BLSKeypair, signature::Signature as BLSSignature,
@@ -946,7 +930,7 @@ mod tests {
             bank_forks::BankForks,
             bank_forks_controller::{BankForksController, BankForksControllerError},
             genesis_utils::{
-                ValidatorVoteKeypairs, create_genesis_config_with_alpenglow_vote_accounts,
+                create_genesis_config_with_alpenglow_vote_accounts, ValidatorVoteKeypairs,
             },
             installed_scheduler_pool::BankWithScheduler,
         },
@@ -973,8 +957,6 @@ mod tests {
         consensus_metrics_receiver: ConsensusMetricsEventReceiver,
         #[allow(dead_code)] // Keep receiver alive to prevent SenderDisconnected errors
         repair_event_receiver: RepairEventReceiver,
-        #[allow(dead_code)]
-        switch_bank_receiver: SwitchBankEventReceiver,
         shared_context: SharedContext,
         voting_context: VotingContext,
         root_context: RootContext,
@@ -983,6 +965,7 @@ mod tests {
     }
 
     struct DirectBankForksController {
+        my_pubkey: Pubkey,
         bank_forks: Arc<RwLock<BankForks>>,
         blockstore: Arc<Blockstore>,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
@@ -994,13 +977,12 @@ mod tests {
             Ok(self.bank_forks.write().unwrap().insert(bank))
         }
 
-        fn set_root(
+        fn enqueue_set_root(
             &self,
-            my_pubkey: Pubkey,
             parent_slot: Slot,
             new_root: Slot,
             highest_super_majority_root: Option<Slot>,
-        ) -> Result<(), BankForksControllerError> {
+        ) {
             root_utils::check_and_handle_new_root(
                 parent_slot,
                 new_root,
@@ -1012,10 +994,9 @@ mod tests {
                 &self.leader_schedule_cache,
                 &self.bank_forks,
                 None,
-                &my_pubkey,
+                &self.my_pubkey,
                 |_| {},
             );
-            Ok(())
         }
 
         fn clear_bank(&self, slot: Slot) -> Result<(), BankForksControllerError> {
@@ -1039,7 +1020,7 @@ mod tests {
         let (consensus_metrics_sender, consensus_metrics_receiver) = unbounded();
         let (leader_window_info_sender, leader_window_info_receiver) = unbounded();
         let (repair_event_sender, repair_event_receiver) = unbounded();
-        let (switch_bank_sender, switch_bank_receiver) = unbounded();
+        let latest_switch_request = LatestSwitchRequest::default();
         let timer_manager = Arc::new(PlRwLock::new(TimerManager::new(
             event_sender,
             exit,
@@ -1083,6 +1064,7 @@ mod tests {
             &bank_forks.read().unwrap().root_bank(),
         ));
         let bank_forks_controller = Arc::new(DirectBankForksController {
+            my_pubkey: my_node_keypair.pubkey(),
             bank_forks: bank_forks.clone(),
             blockstore: blockstore.clone(),
             leader_schedule_cache,
@@ -1098,7 +1080,7 @@ mod tests {
             blockstore: blockstore.clone(),
             highest_parent_ready: highest_parent_ready.clone(),
             repair_event_sender,
-            switch_bank_sender,
+            latest_switch_request,
         };
 
         let vote_history = VoteHistory::new(my_node_keypair.pubkey(), 0);
@@ -1142,7 +1124,6 @@ mod tests {
             cluster_info,
             consensus_metrics_receiver,
             repair_event_receiver,
-            switch_bank_receiver,
             highest_parent_ready,
             shared_context,
             voting_context,
@@ -1340,7 +1321,7 @@ mod tests {
 
         fn check_for_votes(&mut self, expected_votes: &[Vote]) {
             for v in expected_votes {
-                let expected_vote_serialized = bincode::serialize(v).unwrap();
+                let expected_vote_serialized = wincode::serialize(v).unwrap();
                 let signature: BLSSignature =
                     self.my_bls_keypair.sign(&expected_vote_serialized).into();
                 let expected_message = ConsensusMessage::Vote(VoteMessage {
@@ -1360,7 +1341,7 @@ mod tests {
         }
 
         fn check_for_vote(&mut self, expected_vote: &Vote) {
-            let expected_vote_serialized = bincode::serialize(expected_vote).unwrap();
+            let expected_vote_serialized = wincode::serialize(expected_vote).unwrap();
             let signature: BLSSignature =
                 self.my_bls_keypair.sign(&expected_vote_serialized).into();
             let expected_message = ConsensusMessage::Vote(VoteMessage {
@@ -1424,11 +1405,9 @@ mod tests {
             let saved_vote_history =
                 SavedVoteHistory::new(&VoteHistory::new(new_identity.pubkey(), 0), &new_identity)
                     .unwrap();
-            assert!(
-                file_vote_history_storage
-                    .store(&SavedVoteHistoryVersions::from(saved_vote_history),)
-                    .is_ok()
-            );
+            assert!(file_vote_history_storage
+                .store(&SavedVoteHistoryVersions::from(saved_vote_history),)
+                .is_ok());
             self.cluster_info
                 .set_keypair(Arc::new(new_identity.insecure_clone()));
 

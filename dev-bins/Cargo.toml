@@ -1,12 +1,5 @@
 [workspace]
-members = [
-    "../accounts-db/store-tool",
-    "../bench-tps",
-    "../ledger-tool",
-    "../svm-test-harness",
-    "../svm-test-harness/fixture",
-    "../svm-test-harness/instr",
-]
+members = ["../accounts-db/store-tool", "../bench-tps", "../ledger-tool"]
 
 resolver = "2"
 
@@ -65,7 +58,7 @@ rayon = "1.12.0"
 regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bytes = "0.11.19"
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 serial_test = "3.2.0"
 signal-hook = "0.4.4"
@@ -120,7 +113,7 @@ solana-rpc-client = { path = "../rpc-client", version = "=4.2.0-alpha.0", defaul
 solana-rpc-client-api = { path = "../rpc-client-api", version = "=4.2.0-alpha.0" }
 solana-runtime = { path = "../runtime", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-runtime-transaction = { path = "../runtime-transaction", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
-solana-sbpf = { version = "=0.20.0", default-features = false }
+solana-sbpf = { version = "=0.21.0", default-features = false }
 solana-sdk-ids = "3.1.0"
 solana-shred-version = "3.0.1"
 solana-signature = { version = "3.4.0", default-features = false }
@@ -132,8 +125,6 @@ solana-svm = { path = "../svm", version = "=4.2.0-alpha.0", features = ["agave-u
 solana-svm-callback = { path = "../svm-callback", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-svm-feature-set = { path = "../svm-feature-set", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-svm-log-collector = { path = "../svm-log-collector", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
-solana-svm-test-harness-fixture = { path = "../svm-test-harness/fixture", version = "=4.2.0-alpha.0" }
-solana-svm-test-harness-instr = { path = "../svm-test-harness/instr", version = "=4.2.0-alpha.0" }
 solana-svm-timings = { path = "../svm-timings", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-svm-transaction = { path = "../svm-transaction", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }
 solana-syscalls = { path = "../syscalls", version = "=4.2.0-alpha.0", features = ["agave-unstable-api"] }

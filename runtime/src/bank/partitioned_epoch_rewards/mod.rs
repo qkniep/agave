@@ -35,7 +35,10 @@ pub(crate) struct PartitionedStakeReward {
     pub stake_reward: u64,
     /// Reward commission in basis points (0-10,000 representing 0-100%) for
     /// recording reward info.
-    pub commission_bps: u16,
+    //
+    // Note: This field becomes always `None` once SIMD-0232 is activated.
+    // After full activation, it can be removed on feature cleanup.
+    pub commission_bps: Option<u16>,
 }
 
 /// A vector of stake rewards.
@@ -150,7 +153,9 @@ pub(crate) enum EpochRewardPhase {
 
 #[derive(Debug)]
 pub(super) struct RewardCommission {
-    pub(super) commission_bps: u16,
+    // Note: This field becomes always `None` once SIMD-0232 is activated.
+    // After full activation, it can be removed on feature cleanup.
+    pub(super) commission_bps: Option<u16>,
     pub(super) commission_lamports: u64,
 }
 
@@ -349,11 +354,7 @@ impl Bank {
 
     /// # stake accounts to store in one block during partitioned reward interval
     pub(super) fn partitioned_rewards_stake_account_stores_per_block(&self) -> u64 {
-        self.rc
-            .accounts
-            .accounts_db
-            .partitioned_epoch_rewards_config
-            .stake_account_stores_per_block
+        self.partitioned_rewards_stake_account_stores_per_block
     }
 
     /// Calculate the number of blocks required to distribute rewards to all stake accounts.
@@ -427,7 +428,7 @@ mod tests {
                     stake_pubkey: stake_reward.stake_pubkey,
                     stake,
                     stake_reward: stake_reward.stake_reward_info.lamports as u64,
-                    commission_bps: stake_reward.stake_reward_info.commission_bps.unwrap(),
+                    commission_bps: stake_reward.stake_reward_info.commission_bps,
                 })
             } else {
                 None
@@ -689,6 +690,14 @@ mod tests {
         let stake_account_stores_per_block =
             bank.partitioned_rewards_stake_account_stores_per_block();
         assert_eq!(stake_account_stores_per_block, 10);
+
+        let (bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
+        let bank =
+            Bank::new_from_parent_with_bank_forks(&bank_forks, bank, SlotLeader::default(), 1);
+        assert_eq!(
+            bank.partitioned_rewards_stake_account_stores_per_block(),
+            stake_account_stores_per_block
+        );
 
         let check_num_reward_distribution_blocks =
             |num_stakes: u64, expected_num_reward_distribution_blocks: u64| {

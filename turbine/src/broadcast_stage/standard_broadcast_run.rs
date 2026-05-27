@@ -24,8 +24,13 @@ use {
     solana_runtime::bank::Bank,
     solana_sha256_hasher::hashv,
     solana_time_utils::AtomicInterval,
-    std::{borrow::Cow, sync::RwLock},
+    std::{borrow::Cow, collections::VecDeque, sync::RwLock},
 };
+
+// Expect blacklist events to be extremely rare, so we can tightly bound the
+// data structure. Need to be able to hold a full leader span, and we'll go
+// ahead and overprovision a bit just in case.
+const MAX_BROADCAST_BLACKLIST_SIZE: usize = 16;
 
 #[derive(Clone)]
 pub struct StandardBroadcastRun {
@@ -59,6 +64,7 @@ pub struct StandardBroadcastRun {
     votor_event_sender: VotorEventSender,
     max_data_shreds_per_slot: u32,
     max_code_shreds_per_slot: u32,
+    broadcast_blacklist: VecDeque<Slot>,
 }
 
 #[derive(Debug)]
@@ -102,6 +108,22 @@ impl StandardBroadcastRun {
             votor_event_sender,
             max_data_shreds_per_slot: DEFAULT_MAX_DATA_SHREDS_PER_SLOT,
             max_code_shreds_per_slot: DEFAULT_MAX_CODE_SHREDS_PER_SLOT,
+            broadcast_blacklist: VecDeque::new(),
+        }
+    }
+
+    fn is_broadcast_blacklisted(&self, slot: Slot) -> bool {
+        self.broadcast_blacklist.contains(&slot)
+    }
+
+    fn blacklist_broadcast_slot(&mut self, slot: Slot) {
+        if self.is_broadcast_blacklisted(slot) {
+            return;
+        }
+
+        self.broadcast_blacklist.push_back(slot);
+        while self.broadcast_blacklist.len() > MAX_BROADCAST_BLACKLIST_SIZE {
+            self.broadcast_blacklist.pop_front();
         }
     }
 
@@ -283,8 +305,8 @@ impl StandardBroadcastRun {
         receive_results: ReceiveResults,
         bank_forks: &RwLock<BankForks>,
     ) -> Result<()> {
-        let (bsend, brecv) = unbounded();
-        let (ssend, srecv) = unbounded();
+        let (bsend, brecv) = bounded(BROADCAST_CHANNEL_CAPACITY);
+        let (ssend, srecv) = bounded(BROADCAST_CHANNEL_CAPACITY);
         self.process_receive_results(
             keypair,
             blockstore,
@@ -314,6 +336,15 @@ impl StandardBroadcastRun {
             last_tick_height,
         } = receive_results;
 
+        if self.is_broadcast_blacklisted(bank.slot()) {
+            return Ok(());
+        }
+
+        if self.is_broadcast_blacklisted(bank.parent_slot()) {
+            self.blacklist_broadcast_slot(bank.slot());
+            return Err(Error::DuplicateSlotBroadcast(bank.slot()));
+        }
+
         let mut to_shreds_time = Measure::start("broadcast_to_shreds");
         self.max_data_shreds_per_slot = bank.max_data_shreds_per_slot();
         self.max_code_shreds_per_slot = bank.max_code_shreds_per_slot();
@@ -331,8 +362,7 @@ impl StandardBroadcastRun {
                     was_interrupted: true,
                 });
                 let shreds = Arc::new(shreds);
-                socket_sender.send((shreds.clone(), batch_info.clone()))?;
-                blockstore_sender.send((shreds, batch_info))?;
+                dispatch_shreds(blockstore_sender, socket_sender, shreds, batch_info)?;
             }
             // If blockstore already has shreds for this slot,
             // it should not recreate the slot:
@@ -346,6 +376,7 @@ impl StandardBroadcastRun {
                 process_stats.num_extant_slots += 1;
                 // This is a faulty situation that should not happen.
                 // Refrain from generating shreds for the slot.
+                self.blacklist_broadcast_slot(bank.slot());
                 return Err(Error::DuplicateSlotBroadcast(bank.slot()));
             }
 
@@ -431,8 +462,7 @@ impl StandardBroadcastRun {
 
         let shreds = Arc::new(shreds);
         debug_assert!(shreds.iter().all(|shred| shred.slot() == bank.slot()));
-        socket_sender.send((shreds.clone(), batch_info.clone()))?;
-        blockstore_sender.send((shreds, batch_info))?;
+        dispatch_shreds(blockstore_sender, socket_sender, shreds, batch_info)?;
 
         coding_send_time.stop();
 
@@ -638,6 +668,7 @@ mod test {
         solana_keypair::Keypair,
         solana_ledger::{
             blockstore::Blockstore,
+            blockstore_meta::SlotMeta,
             genesis_utils::create_genesis_config,
             get_tmp_ledger_path,
             shred::{DATA_SHREDS_PER_FEC_BLOCK, max_ticks_per_n_shreds},
@@ -1015,6 +1046,112 @@ mod test {
             )
             .unwrap();
         assert!(standard_broadcast_run.completed)
+    }
+
+    #[test]
+    fn test_broadcast_blacklist() {
+        let num_shreds_per_slot = 2;
+        let (
+            blockstore,
+            genesis_config,
+            _cluster_info,
+            parent_bank,
+            leader_keypair,
+            _socket,
+            _bank_forks,
+        ) = setup(num_shreds_per_slot);
+        let bank1 = new_child_bank(&parent_bank, 1);
+
+        blockstore
+            .put_meta(
+                bank1.slot(),
+                &SlotMeta {
+                    slot: bank1.slot(),
+                    parent_slot: Some(bank1.parent_slot()),
+                    received: 1,
+                    ..SlotMeta::default()
+                },
+            )
+            .unwrap();
+
+        let (votor_event_sender, _votor_event_receiver) = unbounded();
+        let mut standard_broadcast_run = StandardBroadcastRun::new(
+            0,
+            Arc::new(MigrationStatus::default()),
+            votor_event_sender,
+            test_leader_schedule_cache(&bank1),
+        );
+        let (bsend, brecv) = unbounded();
+        let (ssend, srecv) = unbounded();
+
+        let ticks = create_ticks(1, 0, genesis_config.hash());
+        let err = standard_broadcast_run
+            .process_receive_results(
+                &leader_keypair,
+                &blockstore,
+                &ssend,
+                &bsend,
+                ReceiveResults {
+                    component: BlockComponent::EntryBatch(ticks.clone()),
+                    bank: bank1.clone(),
+                    last_tick_height: bank1.tick_height() + ticks.len() as u64,
+                },
+                &mut ProcessShredsStats::default(),
+            )
+            .unwrap_err();
+        assert_matches!(err, Error::DuplicateSlotBroadcast(1));
+        assert!(standard_broadcast_run.is_broadcast_blacklisted(1));
+
+        standard_broadcast_run
+            .process_receive_results(
+                &leader_keypair,
+                &blockstore,
+                &ssend,
+                &bsend,
+                ReceiveResults {
+                    component: BlockComponent::EntryBatch(ticks.clone()),
+                    bank: bank1.clone(),
+                    last_tick_height: bank1.tick_height() + ticks.len() as u64,
+                },
+                &mut ProcessShredsStats::default(),
+            )
+            .unwrap();
+        assert!(brecv.try_recv().is_err());
+        assert!(srecv.try_recv().is_err());
+
+        let bank2 = Arc::new(Bank::new_from_parent(
+            bank1.clone(),
+            *bank1.leader(),
+            bank1.slot() + 1,
+        ));
+        let err = standard_broadcast_run
+            .process_receive_results(
+                &leader_keypair,
+                &blockstore,
+                &ssend,
+                &bsend,
+                ReceiveResults {
+                    component: BlockComponent::EntryBatch(ticks.clone()),
+                    bank: bank2,
+                    last_tick_height: bank1.tick_height() + ticks.len() as u64,
+                },
+                &mut ProcessShredsStats::default(),
+            )
+            .unwrap_err();
+        assert_matches!(err, Error::DuplicateSlotBroadcast(2));
+        assert!(standard_broadcast_run.is_broadcast_blacklisted(2));
+
+        for slot in 3..=18 {
+            standard_broadcast_run.blacklist_broadcast_slot(slot);
+        }
+        assert_eq!(
+            standard_broadcast_run.broadcast_blacklist.len(),
+            MAX_BROADCAST_BLACKLIST_SIZE
+        );
+        assert!(!standard_broadcast_run.is_broadcast_blacklisted(1));
+        assert!(!standard_broadcast_run.is_broadcast_blacklisted(2));
+        assert!(standard_broadcast_run.is_broadcast_blacklisted(3));
+        assert!(standard_broadcast_run.is_broadcast_blacklisted(18));
     }
 
     #[test]
