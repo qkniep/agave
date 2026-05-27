@@ -1363,7 +1363,7 @@ mod test {
                 ancestor_duplicate_slots_sender,
                 repair_validators: None,
                 repair_whitelist,
-                standstill_signal: Arc::new(agave_votor::common::StandstillSignal::new()),
+                standstill_signal: Arc::new(agave_votor::standstill::StandstillSignal::new()),
             };
 
             let (ancestor_hashes_replay_update_sender, ancestor_hashes_replay_update_receiver) =

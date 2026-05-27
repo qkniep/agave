@@ -1,6 +1,6 @@
 use {
     crate::{
-        common::scale_standstill_timeout, event::VotorEvent,
+        event::VotorEvent, standstill::scale_standstill_timeout,
         timer_manager::stats::TimerManagerStats,
     },
     crossbeam_channel::Sender,
@@ -22,7 +22,7 @@ struct TimeoutConfig {
 
 impl TimeoutConfig {
     /// Returns a copy with `delta_timeout` scaled by the standstill multiplier
-    /// and capped at [`crate::common::MAX_STANDSTILL_TIMEOUT`]. `delta_first_slice`
+    /// and capped at [`crate::standstill::MAX_STANDSTILL_TIMEOUT`]. `delta_first_slice`
     /// and `delta_block` are protocol pacing, not a function of network synchrony,
     /// so they are not scaled.
     fn scaled(&self, slot: Slot, standstill_slot: Option<Slot>) -> TimeoutConfig {
@@ -252,7 +252,7 @@ impl Timers {
 mod tests {
     use {
         super::*,
-        crate::common::{DELTA_TIMEOUT, MAX_STANDSTILL_TIMEOUT},
+        crate::{common::DELTA_TIMEOUT, standstill::MAX_STANDSTILL_TIMEOUT},
         crossbeam_channel::unbounded,
         solana_clock::DEFAULT_MS_PER_SLOT,
     };

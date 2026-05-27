@@ -46,7 +46,6 @@
 use {
     crate::{
         commitment::CommitmentAggregationData,
-        common::StandstillSignal,
         consensus_metrics::{
             ConsensusMetrics, ConsensusMetricsEventReceiver, ConsensusMetricsEventSender,
         },
@@ -59,6 +58,7 @@ use {
         event_handler::{EventHandler, EventHandlerContext},
         generated_cert_types::GeneratedCertTypes,
         root_utils::RootContext,
+        standstill::StandstillSignal,
         timer_manager::TimerManager,
         vote_history::VoteHistory,
         vote_history_storage::VoteHistoryStorage,

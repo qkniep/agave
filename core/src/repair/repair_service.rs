@@ -13,12 +13,12 @@ use {
             outstanding_requests::OutstandingRequests,
             repair_weight::RepairWeight,
             serve_repair::{
-                RepairPeers, RepairProtocol, RepairRequestHeader, ServeRepair, ShredRepairType,
-                REPAIR_PEERS_CACHE_CAPACITY,
+                REPAIR_PEERS_CACHE_CAPACITY, RepairPeers, RepairProtocol, RepairRequestHeader,
+                ServeRepair, ShredRepairType,
             },
         },
     },
-    agave_votor::common::StandstillSignal,
+    agave_votor::standstill::StandstillSignal,
     agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender},
     lazy_lru::LruCache,
@@ -40,17 +40,17 @@ use {
         bank::Bank,
         bank_forks::{BankForks, SharableBanks},
     },
-    solana_streamer::sendmmsg::{batch_send, SendPktsError},
+    solana_streamer::sendmmsg::{SendPktsError, batch_send},
     solana_time_utils::timestamp,
     std::{
-        collections::{hash_map::Entry, HashMap, HashSet},
+        collections::{HashMap, HashSet, hash_map::Entry},
         iter::Iterator,
         net::{SocketAddr, UdpSocket},
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, RwLock,
+            atomic::{AtomicBool, Ordering},
         },
-        thread::{self, sleep, Builder, JoinHandle},
+        thread::{self, Builder, JoinHandle, sleep},
         time::{Duration, Instant},
     },
 };
@@ -551,7 +551,7 @@ pub struct RepairInfo {
     // Validators which should be given priority when serving
     pub repair_whitelist: Arc<RwLock<HashSet<Pubkey>>>,
     /// Shared standstill state. Repair retry timeouts derived from network
-    /// DELTA are scaled by [`agave_votor::common::scale_standstill_timeout`]
+    /// DELTA are scaled by [`agave_votor::standstill::scale_standstill_timeout`]
     /// while the signal is active, to recover liveness under unknown DELTA.
     pub standstill_signal: Arc<StandstillSignal>,
 }
@@ -1403,13 +1403,13 @@ mod test {
         solana_keypair::Keypair,
         solana_ledger::{
             blockstore::{
-                make_chaining_slot_entries, make_many_slot_entries, make_slot_entries, Blockstore,
+                Blockstore, make_chaining_slot_entries, make_many_slot_entries, make_slot_entries,
             },
-            genesis_utils::{create_genesis_config, GenesisConfigInfo},
+            genesis_utils::{GenesisConfigInfo, create_genesis_config},
             get_tmp_ledger_path_auto_delete,
             shred::max_ticks_per_n_shreds,
         },
-        solana_net_utils::{sockets::bind_to_localhost_unique, SocketAddrSpace},
+        solana_net_utils::{SocketAddrSpace, sockets::bind_to_localhost_unique},
         solana_perf::packet::PacketRef,
         solana_runtime::bank::Bank,
         solana_signer::Signer,
@@ -2005,11 +2005,13 @@ mod test {
             &RwLock::new(OutstandingRequests::default()),
             &identity_keypair,
         );
-        assert!(duplicate_slot_repair_statuses
-            .get(&dead_slot)
-            .unwrap()
-            .repair_pubkey_and_addr
-            .is_none());
+        assert!(
+            duplicate_slot_repair_statuses
+                .get(&dead_slot)
+                .unwrap()
+                .repair_pubkey_and_addr
+                .is_none()
+        );
         assert!(duplicate_slot_repair_statuses.contains_key(&dead_slot));
 
         // Give the slot a repair address
