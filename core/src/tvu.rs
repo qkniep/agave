@@ -11,10 +11,10 @@ use {
             DuplicateConfirmedSlotsReceiver, GossipVerifiedVoteHashReceiver,
             VerifiedVoterSlotsReceiver, VerifiedVoterSlotsSender, VoteTracker,
         },
-        cluster_slots_service::{ClusterSlotsService, cluster_slots::ClusterSlots},
+        cluster_slots_service::{cluster_slots::ClusterSlots, ClusterSlotsService},
         commitment_service::AggregateCommitmentService,
         completed_data_sets_service::CompletedDataSetsSender,
-        consensus::{Tower, tower_storage::TowerStorage},
+        consensus::{tower_storage::TowerStorage, Tower},
         cost_update_service::CostUpdateService,
         drop_bank_service::DropBankService,
         epoch_specs::EpochSpecs,
@@ -23,12 +23,13 @@ use {
             repair_service::{OutstandingShredRepairs, RepairInfo, RepairServiceChannels},
         },
         replay_stage::{ReplayReceivers, ReplaySenders, ReplayStage, ReplayStageConfig},
-        shred_fetch_stage::{SHRED_FETCH_CHANNEL_SIZE, ShredFetchStage},
+        shred_fetch_stage::{ShredFetchStage, SHRED_FETCH_CHANNEL_SIZE},
         voting_service::VotingService,
         warm_quic_cache_service::WarmQuicCacheService,
         window_service::{WindowService, WindowServiceChannels},
     },
     agave_votor::{
+        common::StandstillSignal,
         consensus_metrics::MAX_IN_FLIGHT_CONSENSUS_EVENTS,
         event::{LatestSwitchRequest, LeaderWindowInfo, VotorEventReceiver, VotorEventSender},
         generated_cert_types::GeneratedCertTypes,
@@ -38,7 +39,7 @@ use {
         votor::{Votor, VotorConfig},
     },
     agave_votor_messages::reward_certificate::{BuildRewardCertsRequest, BuildRewardCertsResponse},
-    crossbeam_channel::{Receiver, Sender, bounded, unbounded},
+    crossbeam_channel::{bounded, unbounded, Receiver, Sender},
     solana_client::connection_cache::ConnectionCache,
     solana_clock::Slot,
     solana_geyser_plugin_manager::block_metadata_notifier_interface::BlockMetadataNotifierArc,
@@ -49,7 +50,7 @@ use {
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_ledger::{
-        blockstore::{Blockstore, MAX_COMPLETED_SLOTS_IN_CHANNEL, UpdateParentReceiver},
+        blockstore::{Blockstore, UpdateParentReceiver, MAX_COMPLETED_SLOTS_IN_CHANNEL},
         blockstore_cleanup_service::BlockstoreCleanupService,
         blockstore_processor::TransactionStatusSender,
         entry_notifier_service::EntryNotifierSender,
@@ -75,15 +76,15 @@ use {
     solana_streamer::{
         evicting_sender::EvictingSender,
         nonblocking::simple_qos::SimpleQosConfig,
-        quic::{QuicStreamerConfig, SpawnServerResult, spawn_simple_qos_server},
+        quic::{spawn_simple_qos_server, QuicStreamerConfig, SpawnServerResult},
         streamer::StakedNodes,
     },
-    solana_turbine::{XdpSender, retransmit_stage::RetransmitStage},
+    solana_turbine::{retransmit_stage::RetransmitStage, XdpSender},
     std::{
         collections::HashSet,
         net::UdpSocket,
         num::NonZeroUsize,
-        sync::{Arc, RwLock, atomic::AtomicBool},
+        sync::{atomic::AtomicBool, Arc, RwLock},
         thread::{self, JoinHandle},
     },
     tokio_util::sync::CancellationToken,
@@ -428,6 +429,10 @@ impl Tvu {
             completed_slots_receiver,
         };
 
+        // Shared standstill state, read by both votor (vote timeouts) and
+        // repair (retry timeouts).
+        let standstill_signal = Arc::new(StandstillSignal::new());
+
         // Shared latest switch-bank request from Votor to ReplayStage.
         let latest_switch_request = LatestSwitchRequest::default();
 
@@ -446,6 +451,7 @@ impl Tvu {
                 repair_whitelist: tvu_config.repair_whitelist,
                 cluster_info: cluster_info.clone(),
                 cluster_slots: cluster_slots.clone(),
+                standstill_signal: standstill_signal.clone(),
             };
             let repair_service_channels = RepairServiceChannels::new(
                 verified_voter_slots_receiver,
@@ -527,6 +533,7 @@ impl Tvu {
             consensus_metrics_receiver,
             reward_votes_receiver,
             build_reward_certs_receiver,
+            standstill_signal,
         };
         let votor = Votor::new(votor_config);
 
@@ -730,7 +737,7 @@ pub mod tests {
             blockstore::BlockstoreSignals,
             blockstore_options::BlockstoreOptions,
             create_new_tmp_ledger,
-            genesis_utils::{GenesisConfigInfo, create_genesis_config},
+            genesis_utils::{create_genesis_config, GenesisConfigInfo},
         },
         solana_net_utils::SocketAddrSpace,
         solana_poh::poh_recorder::create_test_recorder,
